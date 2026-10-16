@@ -452,13 +452,18 @@ jobs:
             } else console.log("Cocoa termination passed through Electron before-quit");
           });
           EOF
+      - name: 归档应用目录
+        # upload-artifact 不保留符号链接，直接上传 .app 会破坏
+        # Electron Framework.framework 内部的 Versions/Current 等软链，
+        # 导致下游 codesign 校验报 "bundle format is ambiguous"
+        run: tar -czf release/Trident-app.tar.gz -C release/mac-arm64 Trident.app
       - name: 上传编译产物
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-release
           path: |
             release/*.dmg
-            release/mac-arm64/Trident.app
+            release/Trident-app.tar.gz
           retention-days: 7
   publish:
     name: 发布（Tag 与 Releases）
@@ -512,6 +517,13 @@ jobs:
         with:
           name: macos-release
           path: release
+      - name: 解包应用目录
+        if: needs.prepare.outputs.reuse != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p release/mac-arm64
+          tar -xzf release/Trident-app.tar.gz -C release/mac-arm64
+          rm release/Trident-app.tar.gz
       - name: 创建并推送版本标签
         if: needs.prepare.outputs.reuse != 'true'
         run: |
