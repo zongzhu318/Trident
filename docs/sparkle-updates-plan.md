@@ -1,6 +1,6 @@
 # Trident：Sparkle + GitHub Actions 更新
 
-仓库：[zongzhu318/Trident](https://github.com/zongzhu318/Trident)。从 **0.4.0** 开始接入 Sparkle 2.10.0，首版支持 macOS 12+ / Apple Silicon（arm64）。
+仓库：[zongzhu318/Trident](https://github.com/zongzhu318/Trident)。从 **0.0.1** 开始接入 Sparkle 2.10.0，首版支持 macOS 12+ / Apple Silicon（arm64）。
 
 当前实现采用 **无 Apple Developer ID 证书** 的发布方式：应用做 ad-hoc 签名，DMG 和 appcast 用 Sparkle Ed25519 密钥校验；不进行 Apple 公证。Sparkle 签名不能代替 Apple 身份认证。首次安装可能被 Gatekeeper 拦截，需用户确认来源后在「系统设置 → 隐私与安全性」中允许打开。不要关闭全局 Gatekeeper。
 
@@ -65,21 +65,16 @@ https://zongzhu318.github.io/Trident/stable/appcast-arm64.xml
 完整更新包示例：
 
 ```text
-https://github.com/zongzhu318/Trident/releases/download/v0.4.0/Trident-0.4.0-arm64.dmg
+https://github.com/zongzhu318/Trident/releases/download/v0.0.1/Trident-0.0.1-arm64.dmg
 ```
 
 Pages 专门用于这个应用的更新源；当前只发布一个 stable/arm64 清单和下载首页，不承诺保留其他网站内容或其他架构 feed。
 
 ## 发布版本
 
-首次发布使用 `0.4.0`。确认上述配置完成、代码已提交推送后：
+首次发布使用 `0.0.1`。确认上述配置完成、代码已提交推送后，在 **Actions → Release macOS (Sparkle) → Run workflow** 直接运行；Tag 留空时自动取上一个稳定版 +1，没有历史发布时使用 `package.json` 中的版本。
 
-```bash
-git tag v0.4.0
-git push origin v0.4.0
-```
-
-后续例如 `0.4.1`：更新 `package.json` 和 lockfile 的版本、界面版本及 `docs/release-notes.md`，提交推送，再创建 `v0.4.1` Tag。只接受稳定版 `x.y.z`；Tag 必须与源码版本一致，`CFBundleVersion` 使用同一递增语义版本，不采用 workflow run number。
+后续例如 `0.0.2`：更新 `package.json` 和 lockfile 的版本、界面版本及 `docs/release-notes.md`，提交推送后运行 workflow，或留空 Tag 让流水线自动递增。只接受稳定版 `x.y.z`；Tag 必须与源码版本一致，`CFBundleVersion` 使用同一递增语义版本，不采用 workflow run number。
 
 流水线会：
 
@@ -109,7 +104,7 @@ PR / main / master 的 CI 不读取发布私钥。发布 workflow 串行执行�
 - 更新仅替换 `.app`，保持 Bundle ID `com.trident.desktop` 与原有用户数据位置。
 - 开发模式及普通 `npm run package:mac` 构建不加载正式更新器，检查入口会说明未配置；生产包需通过 `npm run package:release` 构建。
 
-**0.3.0 及以前版本不能自动获得本功能**，需要手动安装一次 GitHub Release 中的 0.4.0。把应用拖入「应用程序」，退出旧实例后启动新版本。不要长期从只读 DMG 内运行应用。
+**0.0.1 之前没有已发布版本**，本版即首个可自动更新的版本，首次需手动安装。把应用拖入「应用程序」，退出旧实例后启动新版本。不要长期从只读 DMG 内运行应用。
 
 ## 本地构建与验证
 
@@ -127,7 +122,7 @@ export SPARKLE_PUBLIC_KEY="你的 Sparkle 公钥"
 npm run package:release
 ```
 
-产物：`release/mac-arm64/Trident.app` 和 `release/Trident-0.4.0-arm64.dmg`。客户端包只含公钥，`SPARKLE_PRIVATE_KEY` 只用于发布阶段。使用 Node-API 稳定 C ABI，不依赖 V8 私有接口；SDK/头文件缓存和编译产物不提交 Git。
+产物：`release/mac-arm64/Trident.app` 和 `release/Trident-0.0.1-arm64.dmg`。客户端包只含公钥，`SPARKLE_PRIVATE_KEY` 只用于发布阶段。使用 Node-API 稳定 C ABI，不依赖 V8 私有接口；SDK/头文件缓存和编译产物不提交 Git。客户端包只含公钥，`SPARKLE_PRIVATE_KEY` 只用于发布阶段。使用 Node-API 稳定 C ABI，不依赖 V8 私有接口；SDK/头文件缓存和编译产物不提交 Git。
 
 正式验收至少需要两个递增版本，用实际发行包验证：旧版本到新版本的替换与重启；连接、密码和主机指纹保留；错误签名与断网不替换应用；用户取消退出；活动连接及文件操作不会无提示中断；首次下载的 Gatekeeper 行为。没有完成这些真实升级检查前，不应宣称端到端升级已验证。
 

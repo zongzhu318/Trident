@@ -1,6 +1,6 @@
 {
   "name": "trident",
-  "version": "0.4.0",
+  "version": "0.0.1",
   "private": true,
   "description": "SSH terminal and SFTP client for macOS",
   "author": "Trident",

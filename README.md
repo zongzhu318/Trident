@@ -28,11 +28,11 @@ npm run package:mac
 
 ## GitHub Actions 与 Sparkle 更新
 
-0.4.0 起提供 Sparkle 原生更新接入。配置 `SPARKLE_PUBLIC_KEY` Variable、`SPARKLE_PRIVATE_KEY` Secret 并开启 GitHub Pages 后，推送与软件版本一致的 `v*` Tag 即可构建发布。详细步骤见 [更新部署文档](docs/sparkle-updates-plan.md)。
+0.0.1 起提供 Sparkle 原生更新接入。配置 `SPARKLE_PUBLIC_KEY` Variable、`SPARKLE_PRIVATE_KEY` Secret 并开启 GitHub Pages 后，在 Actions 中运行「Release macOS (Sparkle)」即可构建发布（无需手动打 Tag）。详细步骤见 [更新部署文档](docs/sparkle-updates-plan.md)。
 
 当前发行流水线支持 arm64，应用使用 ad-hoc 签名，更新包和清单使用 Sparkle Ed25519 签名；**不需要 Apple 证书，也不进行 Apple 公证**。首次安装可能需要在 macOS「隐私与安全性」中允许打开。
 
-发行版通过顶部「Trident → 检查更新…」更新，自动检查由用户自行开启。有连接时需先完成操作并断开连接。0.3.0 及更早版本需手动安装一次含 Sparkle 的版本。
+发行版通过顶部「Trident → 检查更新…」更新，自动检查由用户自行开启。有连接时需先完成操作并断开连接。0.0.1 为首个发布版，无旧版本需要手动迁移。
 
 ## 功能
 
