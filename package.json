@@ -12,10 +12,7 @@
     "test": "node --test tests/*.test.cjs",
     "test:ui": "npm run build && node scripts/launch.cjs scripts/smoke.cjs",
     "format": "prettier --write src electron tests scripts index.html package.json tsconfig.json vite.config.ts README.md",
-    "package:mac": "npm run build && electron-builder --mac dir",
-    "sparkle:sdk": "node scripts/release/sparkle-sdk.cjs",
-    "sparkle:bridge": "node scripts/release/build-bridge.cjs",
-    "package:release": "node scripts/release/package.cjs"
+    "package:mac": "npm run build && electron-builder --mac dir"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
