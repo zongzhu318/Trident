@@ -180,7 +180,7 @@ jobs:
     name: 阶段三：编译打包
     needs: [prepare, test]
     if: needs.prepare.outputs.reuse != 'true'
-    runs-on: macos-15-arm64
+    runs-on: macos-latest
     timeout-minutes: 45
     permissions:
       contents: read
@@ -462,8 +462,10 @@ jobs:
           retention-days: 7
   publish:
     name: 阶段四：发布（Tag 与 Releases）
-    needs: prepare
-    runs-on: macos-15-arm64
+    needs: [prepare, build]
+    # build 在 reuse=true 的重试场景下会被跳过，此时 publish 仍需运行
+    if: always() && needs.prepare.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: macos-latest
     timeout-minutes: 15
     environment: release
     permissions:

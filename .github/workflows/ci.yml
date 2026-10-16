@@ -8,7 +8,7 @@ permissions:
 jobs:
   macos:
     name: macOS 构建与测试
-    runs-on: macos-15-arm64
+    runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - name: 检出代码
