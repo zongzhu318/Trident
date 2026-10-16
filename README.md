@@ -24,7 +24,15 @@ npm start
 npm run package:mac
 ```
 
-生成的 `Trident.app` 位于 `release/mac-arm64/`（Apple Silicon）或 `release/mac/`（Intel）。当前构建未签名、未公证，适用于本机开发体验；正式分发需配置 Apple Developer 签名和公证。
+生成的 `Trident.app` 位于 `release/mac-arm64/`（Apple Silicon）或 `release/mac/`（Intel）。这是本机开发包，不开启正式更新。
+
+## GitHub Actions 与 Sparkle 更新
+
+0.4.0 起提供 Sparkle 原生更新接入。配置 `SPARKLE_PUBLIC_KEY` Variable、`SPARKLE_PRIVATE_KEY` Secret 并开启 GitHub Pages 后，推送与软件版本一致的 `v*` Tag 即可构建发布。详细步骤见 [更新部署文档](docs/sparkle-updates-plan.md)。
+
+当前发行流水线支持 arm64，应用使用 ad-hoc 签名，更新包和清单使用 Sparkle Ed25519 签名；**不需要 Apple 证书，也不进行 Apple 公证**。首次安装可能需要在 macOS「隐私与安全性」中允许打开。
+
+发行版通过顶部「Trident → 检查更新…」更新，自动检查由用户自行开启。有连接时需先完成操作并断开连接。0.3.0 及更早版本需手动安装一次含 Sparkle 的版本。
 
 ## 功能
 
@@ -104,7 +112,7 @@ npm run test:ui
 
 本版是可运行的开发 MVP，支持 **SSH / SFTP / FTP / 显式 FTPS**。暂不支持目录递归传输/删除、断点续传、任务队列、跳板机、端口转发、键盘交互式 MFA、自动重连、隐式 FTPS 和自定义证书信任。符号链接不打开，可重命名或删除链接本身。一个连接同一时间执行一个文件操作；关闭连接会中断传输。上传失败可能留下远程不完整文件，需要自行检查处理。
 
-旧版未包含协议字段的连接配置会按 SSH 读取，无需手动迁移。应用仍为未签名公证的本机开发版本。
+旧版未包含协议字段的连接配置会按 SSH 读取，无需手动迁移。应用没有 Apple Developer ID 签名及公证。
 
 ## 性能与资源占用
 

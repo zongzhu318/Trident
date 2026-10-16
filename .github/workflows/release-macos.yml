@@ -1,0 +1,98 @@
+name: Release macOS (Sparkle)
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, e.g. v0.4.0 (also used to retry Pages deployment)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: trident-stable-release
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.repository == 'zongzhu318/Trident'
+    runs-on: macos-15-arm64
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.22.3"
+          cache: npm
+      - name: Validate release and decide whether to reuse published assets
+        id: preflight
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: node scripts/release/publish.cjs preflight
+      - name: Get pinned Sparkle SDK
+        run: npm run sparkle:sdk
+      - if: steps.preflight.outputs.reuse != 'true'
+        run: npm ci
+      - if: steps.preflight.outputs.reuse != 'true'
+        run: npm test
+      - if: steps.preflight.outputs.reuse != 'true'
+        run: npm run test:ui
+      - name: Build ad-hoc-signed application and DMG (no Apple certificate)
+        if: steps.preflight.outputs.reuse != 'true'
+        run: npm run package:release
+      - name: Verify native updater and Cocoa termination in packaged app
+        if: steps.preflight.outputs.reuse != 'true'
+        run: node scripts/release/smoke-native.cjs release/mac-arm64/Trident.app
+      - name: Sign updates and publish immutable release
+        if: steps.preflight.outputs.reuse != 'true'
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: node scripts/release/publish.cjs publish
+      - name: Reuse published feed on retry
+        if: steps.preflight.outputs.reuse == 'true'
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: node scripts/release/publish.cjs reuse
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: .release-work/pages
+  pages:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy update feed after release is public
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+      - name: Verify public feed is byte-identical to published release
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fLsS --retry 5 --retry-all-errors "https://github.com/zongzhu318/Trident/releases/download/${RELEASE_TAG}/appcast-arm64.xml" -o release.xml
+          for attempt in {1..12}; do
+            if curl -fLsS "https://zongzhu318.github.io/Trident/stable/appcast-arm64.xml?release=${RELEASE_TAG}&attempt=${attempt}" -o pages.xml && cmp -s release.xml pages.xml; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'Pages feed is not yet identical to the release asset.' >&2
+          exit 1

@@ -1,5 +1,12 @@
 node_modules/
 dist/
-release/
+/release/
 .DS_Store
 *.log
+vendor/
+native/sparkle-bridge/*.node
+build/sparkle-config.json
+.release-work/
+*.p12
+*.p8
+*.key

@@ -195,7 +195,7 @@ export default function App() {
             </div>
             <button className="help-button" onClick={() => setHelp(true)}>
               <CircleHelp size={16} />
-              使用指南<span>v0.3.0</span>
+              使用指南<span>v0.4.0</span>
             </button>
           </div>
         </aside>

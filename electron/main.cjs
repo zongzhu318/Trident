@@ -14,6 +14,8 @@ const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const validate = require("./validation.cjs");
 const { TerminalOutput } = require("./terminal-output.cjs");
+const { createUpdater } = require("./updater.cjs");
+const { createQuitCoordinator } = require("./quit-coordinator.cjs");
 const { sftpFiles, ftpFiles } = require("./files.cjs");
 const {
   makeVault,
@@ -43,6 +45,33 @@ function publishTheme() {
 }
 let persistQueue = Promise.resolve();
 let configurationQueue = Promise.resolve();
+let updater;
+const quitter = createQuitCoordinator({
+  app,
+  confirm: () => {
+    if (!sessions.size) return true;
+    return (
+      dialog.showMessageBoxSync(window, {
+        type: "warning",
+        message: "断开所有连接并退出？",
+        detail:
+          "退出或安装更新会中断远程终端和正在传输的文件。可取消并在操作完成后重试。",
+        buttons: ["取消", "断开并退出"],
+        defaultId: 0,
+        cancelId: 0,
+      }) === 1
+    );
+  },
+  flush: async () => {
+    await configurationQueue;
+    await persistQueue;
+  },
+  disconnect: () => {
+    for (const id of sessions.keys()) disconnect(id);
+  },
+  showError: (error) =>
+    dialog.showErrorBox("无法安全退出", `配置尚未保存：${error.message}`),
+});
 const dev = process.argv.includes("--dev");
 const emit = (id, type, data) => {
   if (window && !window.isDestroyed())
@@ -86,6 +115,7 @@ function disconnect(id) {
     session.output?.dispose();
     session.ready = false;
     sessions.delete(id);
+    updater?.refreshBusy();
     if (session.ftp) {
       session.client.close();
       emit(id, "close", null);
@@ -101,11 +131,13 @@ function handle(channel, fn) {
     ) {
       throw new Error("非法请求来源");
     }
+    quitter.assertOpen();
     return fn(...args);
   });
 }
 
 async function connect(id, raw, credentials = {}) {
+  updater?.assertCanConnect();
   if (typeof id !== "string" || id.length > 128 || sessions.has(id))
     throw new Error("会话 ID 无效或重复");
   const profile = validate.profile(raw);
@@ -127,6 +159,7 @@ async function connect(id, raw, credentials = {}) {
     transferring: false,
   };
   sessions.set(id, session);
+  updater?.refreshBusy();
   const options = {
     host: profile.host,
     port: profile.port,
@@ -286,6 +319,7 @@ async function connectFTP(id, profile, credentials) {
   const client = new FTPClient(30000);
   const session = { client, ftp: true, ready: false, transferring: false };
   sessions.set(id, session);
+  updater?.refreshBusy();
   try {
     await client.access({
       host: profile.host,
@@ -635,6 +669,7 @@ function createWindow() {
     for (const id of sessions.keys()) disconnect(id);
   });
   window.on("close", (event) => {
+    if (quitter.prepared) return;
     if (!sessions.size) return;
     const response = dialog.showMessageBoxSync(window, {
       type: "question",
@@ -668,12 +703,20 @@ app
     }));
     knownHosts = await readJSON("known-hosts.json", {});
     registerIPC();
+    updater = createUpdater({
+      app,
+      dialog,
+      prepareQuit: quitter.prepare,
+      cancelQuit: quitter.cancelPreparation,
+      isBusy: () => sessions.size > 0,
+    });
     Menu.setApplicationMenu(
       Menu.buildFromTemplate([
         {
           label: "Trident",
           submenu: [
             { role: "about" },
+            ...updater.menu(),
             { type: "separator" },
             { role: "services" },
             { type: "separator" },
