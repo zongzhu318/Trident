@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   prepare:
-    name: 阶段一：准备（版本号管理）
+    name: 准备（版本号管理）
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: release
@@ -154,7 +154,7 @@ jobs:
           fi
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
   test:
-    name: 阶段二：单元测试
+    name: 单元测试
     needs: prepare
     if: needs.prepare.outputs.reuse != 'true'
     runs-on: ubuntu-24.04
@@ -177,7 +177,7 @@ jobs:
       - name: 运行单元测试
         run: npm test
   build:
-    name: 阶段三：编译打包
+    name: 编译打包
     needs: [prepare, test]
     if: needs.prepare.outputs.reuse != 'true'
     runs-on: macos-latest
@@ -461,7 +461,7 @@ jobs:
             release/mac-arm64/Trident.app
           retention-days: 7
   publish:
-    name: 阶段四：发布（Tag 与 Releases）
+    name: 发布（Tag 与 Releases）
     needs: [prepare, build]
     # build 在 reuse=true 的重试场景下会被跳过，此时 publish 仍需运行
     if: always() && needs.prepare.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
@@ -560,7 +560,9 @@ jobs:
         run: |
           set -euo pipefail
           APP="release/mac-arm64/Trident.app"
-          codesign --verify --deep --strict "$APP"
+          # 不能加 --deep：Electron Framework.framework 同时具备 app/framework 两种
+          # bundle 特征，--deep 遍历时会报 "bundle format is ambiguous"
+          codesign --verify --strict "$APP"
           plutil -convert json -o - "${APP}/Contents/Info.plist" | jq -e \
             --arg version "$RELEASE_VERSION" \
             --arg public_key "$(printf '%s' "$SPARKLE_PUBLIC_KEY" | tr -d '[:space:]')" \
