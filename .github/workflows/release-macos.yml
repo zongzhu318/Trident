@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   prepare:
-    name: 准备（版本号管理）
+    name: 准备发布版本
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: release
@@ -55,7 +55,12 @@ jobs:
             TAG="v${VERSION}"
           else
             VERSION="${TAG#v}"
+            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::warning::用户录入的版本号有问题：「${VERSION}」不是合法的 X.Y.Z 格式，将在校验阶段失败" >&2
+            fi
           fi
+          echo "本次发布版本号：${VERSION}"
+          echo "本次发布标签：${TAG}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
       - name: 校验发布条件
