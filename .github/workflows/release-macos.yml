@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 可选：留空时自动取上一个稳定版 +1；重试 Pages 部署时填写已发布的标签，例如 v0.4.0
+        description: 可选：留空时自动取上一个稳定版 +1；重试 Pages 部署时填写已发布的标签（如 v0.0.1）
         required: false
         type: string
 concurrency:
@@ -605,7 +605,8 @@ jobs:
             echo "无法读取历史更新源：HTTP ${STATUS}" >&2
             exit 1
           fi
-          vendor/sparkle/bin/generate_appcast \
+          printf '%s\n' "$SPARKLE_PRIVATE_KEY" | vendor/sparkle/bin/generate_appcast \
+            --ed-key-file - \
             --maximum-deltas 0 \
             --embed-release-notes \
             --maximum-versions 3 \
