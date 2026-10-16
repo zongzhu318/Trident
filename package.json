@@ -1,0 +1,58 @@
+{
+  "name": "trident",
+  "version": "0.3.0",
+  "private": true,
+  "description": "SSH terminal and SFTP client for macOS",
+  "author": "Trident",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && node scripts/launch.cjs . --dev\"",
+    "build": "tsc --noEmit && vite build",
+    "start": "node scripts/launch.cjs .",
+    "test": "node --test tests/*.test.cjs",
+    "test:ui": "npm run build && node scripts/launch.cjs scripts/smoke.cjs",
+    "format": "prettier --write src electron tests scripts index.html package.json tsconfig.json vite.config.ts README.md",
+    "package:mac": "npm run build && electron-builder --mac dir"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "basic-ftp": "^6.2.3",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ssh2": "^1.16.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "electron": "^44.7.2",
+    "electron-builder": "^26.15.3",
+    "prettier": "^3.9.10",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0",
+    "wait-on": "^8.0.2"
+  },
+  "build": {
+    "appId": "com.trident.desktop",
+    "productName": "Trident",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "target": "dir",
+      "identity": null
+    }
+  }
+}
