@@ -15,22 +15,22 @@
     "package:mac": "npm run build && electron-builder --mac dir"
   },
   "dependencies": {
-    "@xterm/addon-fit": "^0.10.0",
-    "@xterm/xterm": "^5.5.0",
     "basic-ftp": "^6.2.3",
-    "lucide-react": "^0.468.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
     "ssh2": "^1.16.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "concurrently": "^9.1.2",
     "electron": "^44.7.2",
     "electron-builder": "^26.15.3",
+    "lucide-react": "^0.468.0",
     "prettier": "^3.9.10",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "typescript": "^5.7.3",
     "vite": "^6.1.0",
     "wait-on": "^8.0.2"
@@ -47,6 +47,11 @@
       "package.json"
     ],
     "asar": true,
+    "electronLanguages": [
+      "zh_CN",
+      "zh_TW",
+      "en"
+    ],
     "npmRebuild": false,
     "mac": {
       "icon": "build/icon.icns",
