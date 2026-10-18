@@ -310,7 +310,7 @@ jobs:
           hdiutil create \
             -volname "Trident ${RELEASE_VERSION}" \
             -srcfolder "$STAGING" \
-            -format UDZO \
+            -format ULMO \
             -ov \
             "release/Trident-${RELEASE_VERSION}-arm64.dmg"
       - name: 验证打包后的原生更新器
