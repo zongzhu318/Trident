@@ -105,3 +105,38 @@ test("development builds expose an explanation without loading native updates", 
   assert.match(errors[0], /未配置/);
   assert.equal(updater.menu()[1].enabled, false);
 });
+
+test("resume that fails to terminate the app restores availability", async () => {
+  const errors = [];
+  let cancelled = 0;
+  const bridge = {
+    start() {},
+    state: () => ({ pendingInstall: true }),
+    setBusy() {},
+    resume() {},
+  };
+  const originalPlatform = process.platform;
+  const originalResourcesPath = process.resourcesPath;
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  process.resourcesPath = "/tmp/trident-test-resources";
+  try {
+    const updater = createUpdater({
+      app: { isPackaged: true },
+      dialog: { showErrorBox: (_, e) => errors.push(e) },
+      prepareQuit: async () => true,
+      cancelQuit: () => cancelled++,
+      isBusy: () => false,
+      load: (p) => (p.endsWith("config.json") ? { enabled: true } : bridge),
+      resumeGraceMs: 20,
+    });
+    updater.menu()[0].click();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(cancelled, 0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(cancelled, 1);
+    assert.match(errors[0], /未能完成/);
+  } finally {
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+    process.resourcesPath = originalResourcesPath;
+  }
+});

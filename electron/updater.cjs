@@ -7,6 +7,7 @@ function createUpdater({
   cancelQuit,
   isBusy,
   load = require,
+  resumeGraceMs = 10000,
 }) {
   let bridge;
   let unavailable =
@@ -18,6 +19,14 @@ function createUpdater({
       if (bridge?.state().pendingInstall && (await prepareQuit())) {
         bridge.setBusy(false);
         bridge.resume();
+        // Sparkle 恢复安装的重启若未真正终止进程，不会回调 cancel-install，
+        // 此处兜底恢复 IPC，避免应用留在永久拒绝请求的状态。
+        setTimeout(() => {
+          cancelQuit?.();
+          showError(
+            new Error("更新重启未能完成，已恢复应用；请手动重启以完成更新。"),
+          );
+        }, resumeGraceMs).unref();
       }
     } catch (error) {
       cancelQuit?.();

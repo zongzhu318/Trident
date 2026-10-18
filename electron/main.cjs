@@ -122,7 +122,7 @@ function disconnect(id) {
     } else session.client.destroy();
   }
 }
-function handle(channel, fn) {
+function handle(channel, fn, { allowWhileClosing = false } = {}) {
   ipcMain.handle(channel, (event, ...args) => {
     if (
       !window ||
@@ -131,7 +131,7 @@ function handle(channel, fn) {
     ) {
       throw new Error("非法请求来源");
     }
-    quitter.assertOpen();
+    if (!allowWhileClosing) quitter.assertOpen();
     return fn(...args);
   });
 }
@@ -379,7 +379,8 @@ function progress(id, name, direction) {
 }
 
 function registerIPC() {
-  handle("theme:get", themeState);
+  // 纯读取，退出准备期间渲染进程仍需它完成首屏渲染
+  handle("theme:get", themeState, { allowWhileClosing: true });
   handle("theme:set", (mode) =>
     updateConfiguration(async () => {
       if (!["system", "light", "dark"].includes(mode))

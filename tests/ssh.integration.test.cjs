@@ -214,6 +214,7 @@ test(
     let destination;
     let instance;
     let startup;
+    let quitRequests = 0;
     class FakeWindow extends EventEmitter {
       constructor() {
         super();
@@ -244,7 +245,7 @@ test(
         shouldUseDarkColors: true,
       }),
       safeStorage: testStorage(),
-      app: {
+      app: Object.assign(new EventEmitter(), {
         getPath: () => root,
         whenReady: () => ({
           then: (fn) => {
@@ -252,9 +253,10 @@ test(
             return startup;
           },
         }),
-        on() {},
-        quit() {},
-      },
+        quit() {
+          quitRequests++;
+        },
+      }),
       BrowserWindow: FakeWindow,
       ipcMain: { handle: (channel, fn) => handlers.set(channel, fn), on() {} },
       dialog: {
@@ -664,6 +666,17 @@ test(
           ),
           "FTPS must not fall back to plain FTP",
         );
+      },
+    );
+    await t.test(
+      "quit preparation keeps the theme readable but rejects stateful IPC, and cannot be re-entered",
+      async () => {
+        electron.app.emit("before-quit", { preventDefault() {} });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        assert.equal(quitRequests, 1);
+        assert.equal((await invoke("theme:get")).mode, "system");
+        await assert.rejects(async () => invoke("profiles:list"), /请稍候/);
+        await assert.rejects(async () => invoke("theme:set", "dark"), /请稍候/);
       },
     );
   },
