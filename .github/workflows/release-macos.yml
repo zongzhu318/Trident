@@ -61,6 +61,11 @@ jobs:
           fi
           echo "本次发布版本号：${VERSION}"
           echo "本次发布标签：${TAG}"
+          {
+            echo "### 准备发布版本"
+            echo "- 版本号：${VERSION}"
+            echo "- 标签：${TAG}"
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
       - name: 校验发布条件
@@ -95,8 +100,10 @@ jobs:
           fi
           if [ "$(echo "$RELEASES" | jq --arg tag "$RELEASE_TAG" '[.[] | select(.tag_name == $tag)] | length')" != "0" ]; then
             echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "- 复用模式：已存在同名 Release，本次跳过构建，仅重试发布" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "- 复用模式：否，执行完整构建" >> "$GITHUB_STEP_SUMMARY"
           fi
           # 历史更新源检查：临时故障的响应不得被误当作可覆盖的空白更新源
           STATUS="$(curl -sSL --retry 3 -o previous-feed.xml -w '%{http_code}' "https://zongzhu318.github.io/Trident/stable/appcast-arm64.xml" || true)"
