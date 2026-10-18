@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 可选：留空时自动取上一个稳定版 +1；重试 Pages 部署时填写已发布的标签（如 v0.0.1）
+        description: 可选：留空时自动取上一个稳定版 +1；填写时必须是尚未发布的全新标签（如 v0.0.1）
         required: false
         type: string
 concurrency:
@@ -21,7 +21,6 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       sha: ${{ steps.commit.outputs.sha }}
-      reuse: ${{ steps.preflight.outputs.reuse }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -93,17 +92,14 @@ jobs:
             echo "已存在更新的稳定版本 v${HIGHEST}，禁止发布更旧的版本" >&2
             exit 1
           fi
-          # 同名草稿必须人工清理后才能重试；已发布产物永不覆盖
+          # 同名草稿必须人工清理后才能重试；同名 Release 禁止再次触发，每次发布都是全新版本
           if [ "$(echo "$RELEASES" | jq --arg tag "$RELEASE_TAG" '[.[] | select(.draft and .tag_name == $tag)] | length')" != "0" ]; then
             echo "存在标签 ${RELEASE_TAG} 的草稿。请检查其资产后删除草稿再重试" >&2
             exit 1
           fi
           if [ "$(echo "$RELEASES" | jq --arg tag "$RELEASE_TAG" '[.[] | select(.tag_name == $tag)] | length')" != "0" ]; then
-            echo "reuse=true" >> "$GITHUB_OUTPUT"
-            echo "- 复用模式：已存在同名 Release，本次跳过构建，仅重试发布" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "reuse=false" >> "$GITHUB_OUTPUT"
-            echo "- 复用模式：否，执行完整构建" >> "$GITHUB_STEP_SUMMARY"
+            echo "已存在标签 ${RELEASE_TAG} 的 Release。每次发布必须是全新版本，请递增版本号，不要重复触发同名标签" >&2
+            exit 1
           fi
           # 历史更新源检查：临时故障的响应不得被误当作可覆盖的空白更新源
           STATUS="$(curl -sSL --retry 3 -o previous-feed.xml -w '%{http_code}' "https://zongzhu318.github.io/Trident/stable/appcast-arm64.xml" || true)"
@@ -155,20 +151,15 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.version.outputs.tag }}"
-          if [ "${{ steps.preflight.outputs.reuse }}" != "true" ] && git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null; then
-            echo "::error::标签 ${TAG} 已存在。请删除该标签后重试，或改用该标签触发重试流程" >&2
+          if git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null; then
+            echo "::error::标签 ${TAG} 已存在。每次发布必须是全新版本，请删除该标签或递增版本号" >&2
             exit 1
           fi
-          if [ "${{ steps.preflight.outputs.reuse }}" = "true" ]; then
-            SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"
-          else
-            SHA="$(git rev-parse HEAD)"
-          fi
+          SHA="$(git rev-parse HEAD)"
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
   test:
     name: 单元测试
     needs: prepare
-    if: needs.prepare.outputs.reuse != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -191,7 +182,6 @@ jobs:
   build:
     name: 编译打包
     needs: [prepare, test]
-    if: needs.prepare.outputs.reuse != 'true'
     runs-on: macos-latest
     timeout-minutes: 45
     permissions:
@@ -489,8 +479,6 @@ jobs:
   publish:
     name: 发布（Tag 与 Releases）
     needs: [prepare, build]
-    # build 在 reuse=true 的重试场景下会被跳过，此时 publish 仍需运行
-    if: always() && needs.prepare.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: macos-latest
     timeout-minutes: 15
     environment: release
@@ -533,29 +521,22 @@ jobs:
           tar -xJf "vendor/Sparkle-${SDK_VERSION}.tar.xz" -C vendor/sparkle
           echo "${SDK_VERSION}:${SDK_SHA256}" > "$MARKER"
       - name: 下载编译产物
-        if: needs.prepare.outputs.reuse != 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: macos-release
           path: release
       - name: 解包应用目录
-        if: needs.prepare.outputs.reuse != 'true'
         run: |
           set -euo pipefail
           mkdir -p release/mac-arm64
           tar -xzf release/Trident-app.tar.gz -C release/mac-arm64
           rm release/Trident-app.tar.gz
       - name: 创建并推送版本标签
-        if: needs.prepare.outputs.reuse != 'true'
         run: |
           set -euo pipefail
           TAG="${RELEASE_TAG}"
-          if git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null; then
-            git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
-          else
-            git tag "${TAG}"
-            git push origin "${TAG}"
-          fi
+          git tag "${TAG}"
+          git push origin "${TAG}"
       - name: 校验标签与签名密钥
         run: |
           set -euo pipefail
@@ -589,7 +570,6 @@ jobs:
           }
           EOF
       - name: 校验打包应用元数据
-        if: needs.prepare.outputs.reuse != 'true'
         run: |
           set -euo pipefail
           APP="release/mac-arm64/Trident.app"
@@ -608,7 +588,6 @@ jobs:
               and .SUVerifyUpdateBeforeExtraction == true' > /dev/null \
             || { echo "打包后的更新器元数据与发布配置不一致" >&2; exit 1; }
       - name: 生成并校验更新源
-        if: needs.prepare.outputs.reuse != 'true'
         run: |
           set -euo pipefail
           ARCHIVES=".release-work/archives"
@@ -669,7 +648,6 @@ jobs:
             shasum -a 256 "${ARCHIVES}/${DMG_NAME}" "${ARCHIVES}/appcast-arm64.xml" | sed "s#${ARCHIVES}/##"
           } > "${ARCHIVES}/SHA256SUMS"
       - name: 发布正式 Release
-        if: needs.prepare.outputs.reuse != 'true'
         run: |
           set -euo pipefail
           # 先建草稿传产物，确认无误后转正；发布产物不可变，绝不覆盖
@@ -679,13 +657,6 @@ jobs:
             ".release-work/archives/appcast-arm64.xml" \
             ".release-work/archives/SHA256SUMS"
           gh release edit "$RELEASE_TAG" --draft=false --latest
-      - name: 复用已发布的更新源（重试场景）
-        if: needs.prepare.outputs.reuse == 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p .release-work/archives
-          gh release download "$RELEASE_TAG" --pattern appcast-arm64.xml --dir .release-work/archives --clobber
-          printf '%s\n' "$SPARKLE_PRIVATE_KEY" | vendor/sparkle/bin/sign_update --ed-key-file - --verify ".release-work/archives/appcast-arm64.xml"
       - name: 校验产物可达并准备 Pages 部署产物
         run: |
           set -euo pipefail

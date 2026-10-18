@@ -89,7 +89,7 @@ PR / main / master 的 CI 不读取发布私钥。发布 workflow 串行执行�
 
 ### 失败重试
 
-- **Release 已公开，Pages 部署失败**：在 Actions → Release macOS (Sparkle) → Run workflow 填写同一个 Tag。会复用已发布清单，不重新构建或覆盖 DMG。
+- **Release 已公开，Pages 部署失败**：发布流水线不重试同名标签。修复 Pages 部署问题后，递增版本号发布一个全新版本；每次触发发布都必须是未发布的全新 Tag。
 - **存在未完成的 draft Release**：先人工检查该 draft，确认没有对外发布后删除 draft，再重试。流水线不会自动覆盖已有资产。
 - **已发布包本身有问题**：修复并递增版本发布；不要重写旧 Tag、替换同名 DMG 或降级 feed。
 - **Pages 首次返回 404**：首发允许没有历史清单；其他网络错误会停止发布，避免丢失历史 feed。历史清单必须通过原密钥验证。
