@@ -47,11 +47,48 @@ export default function App() {
       .then(setProfiles)
       .catch((e) => setError(errorText(e)));
   }, []);
+  function stepSession(delta: number) {
+    if (!sessions.length) return;
+    const index = sessions.findIndex((s) => s.id === active);
+    const next =
+      index === -1
+        ? delta > 0
+          ? 0
+          : sessions.length - 1
+        : (index + delta + sessions.length) % sessions.length;
+    setActive(sessions[next].id);
+  }
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       if (event.metaKey && event.key === "n") {
         event.preventDefault();
         setModal({ connect: false });
+      }
+      if (event.metaKey && event.key === "t") {
+        event.preventDefault();
+        setModal({ connect: true });
+      }
+      if (event.metaKey && /^[1-9]$/.test(event.key)) {
+        const session = sessions[Number(event.key) - 1];
+        if (session) {
+          event.preventDefault();
+          setActive(session.id);
+        }
+      }
+      if (
+        event.metaKey &&
+        event.shiftKey &&
+        (event.code === "BracketRight" || event.code === "BracketLeft")
+      ) {
+        event.preventDefault();
+        stepSession(event.code === "BracketRight" ? 1 : -1);
+      }
+      if (event.metaKey && event.key === "w") {
+        const session = sessions.find((s) => s.id === active);
+        if (session) {
+          event.preventDefault();
+          void closeSession(session.id).catch((e) => setError(errorText(e)));
+        }
       }
       if (event.key === "Escape") {
         setModal(null);
@@ -60,7 +97,7 @@ export default function App() {
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, []);
+  }, [sessions, active]);
   async function start(
     profile: Profile,
     credentials: Credentials,
