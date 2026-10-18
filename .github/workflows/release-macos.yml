@@ -409,8 +409,17 @@ jobs:
                     }),
                   );
                 });
+              // 主进程引导完成前在目标进程内创建定时器会命中 debuglog 未初始化状态，故在宿主侧轮询等待引导完成
+              let ready = false;
+              for (let i = 0; i < 100 && !ready; i++) {
+                try {
+                  const probe = await evaluate("!!process.mainModule");
+                  ready = probe?.result?.value === true;
+                } catch {}
+                if (!ready) await new Promise((r) => setTimeout(r, 50));
+              }
+              if (!ready) throw new Error("主进程引导未在预期时间内完成");
               const result = await evaluate(`(async () => {
-                for (let i = 0; i < 100 && !process.mainModule; i++) await new Promise(r => setTimeout(r, 50));
                 const { app, Menu } = process.mainModule.require('electron');
                 await app.whenReady();
                 for (let i = 0; i < 100 && !Menu.getApplicationMenu()?.items[0]?.submenu?.items.some(item => item.label === '自动检查更新'); i++) await new Promise(r => setTimeout(r, 50));
