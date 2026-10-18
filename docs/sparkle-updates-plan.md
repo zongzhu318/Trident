@@ -74,16 +74,17 @@ Pages 专门用于这个应用的更新源；当前只发布一个 stable/arm64 
 
 首次发布使用 `0.0.1`。确认上述配置完成、代码已提交推送后，在 **Actions → Release macOS (Sparkle) → Run workflow** 直接运行；Tag 留空时自动取上一个稳定版 +1，没有历史发布时使用 `package.json` 中的版本。
 
-后续例如 `0.0.2`：更新 `package.json` 和 lockfile 的版本、界面版本及 `docs/release-notes.md`，提交推送后运行 workflow，或留空 Tag 让流水线自动递增。只接受稳定版 `x.y.z`；Tag 必须与源码版本一致，`CFBundleVersion` 使用同一递增语义版本，不采用 workflow run number。
+后续例如 `0.0.2`：更新 `package.json` 和 lockfile 的版本及界面版本，提交推送后运行 workflow，或留空 Tag 让流水线自动递增。只接受稳定版 `x.y.z`；Tag 必须与源码版本一致，`CFBundleVersion` 使用同一递增语义版本，不采用 workflow run number。
 
 流水线会：
 
 1. 校验版本、仓库、密钥是否匹配；拒绝用旧版本覆盖新 Release / appcast。
 2. 执行测试和 UI 回归，校验 Sparkle SDK 的固定 SHA-256，编译 Node-API / Objective-C++ 桥。
 3. 构建 arm64 应用、嵌入 Sparkle.framework 和公钥、完成 ad-hoc 签名并生成 DMG。
-4. 用 Sparkle 官方 `generate_appcast` 签名最终 DMG 和 XML 清单；解压前验证开启，签名清单验证开启，不生成 delta。
-5. 上传 DMG、appcast 和 SHA256SUMS 到 draft Release，全部完成后发布 Release。
-6. 确认公开下载可用，再部署 Pages，并检查线上清单与 Release 中的文件逐字节一致。
+4. 按上一个发布标签汇总 Conventional Commits 提交历史，自动生成更新说明：只收录用户可感知的 feat / fix / perf / refactor / style / build，标注不兼容变更与影响范围，分「新功能 / 修复 / 优化」三组；无变更时写「例行发布」。首次发布沿用 `docs/release-notes.md`。说明以 Markdown 嵌入 appcast，Sparkle 按 `sparkle:format="markdown"` 渲染。
+5. 用 Sparkle 官方 `generate_appcast` 签名最终 DMG 和 XML 清单；解压前验证开启，签名清单验证开启，不生成 delta。
+6. 上传 DMG、appcast 和 SHA256SUMS 到 draft Release，全部完成后发布 Release。
+7. 确认公开下载可用，再部署 Pages，并检查线上清单与 Release 中的文件逐字节一致。
 
 PR / main / master 的 CI 不读取发布私钥。发布 workflow 串行执行，第三方 Actions 固定 commit SHA。`GITHUB_TOKEN` 由 Actions 自动提供，无需个人 PAT。
 

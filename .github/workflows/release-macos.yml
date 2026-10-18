@@ -20,6 +20,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      previous_tag: ${{ steps.version.outputs.previous_tag }}
       sha: ${{ steps.commit.outputs.sha }}
     env:
       GH_TOKEN: ${{ github.token }}
@@ -41,6 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${REQUESTED_TAG}"
+          LAST=""
           if [ -z "$TAG" ]; then
             # 取已发布的最高稳定版补丁号 +1；无历史发布时回退 package.json 版本
             LAST="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
@@ -60,13 +62,21 @@ jobs:
           fi
           echo "本次发布版本号：${VERSION}"
           echo "本次发布标签：${TAG}"
+          # 上一个已发布稳定版标签，用于汇总两个版本之间的提交历史
+          PREVIOUS_TAG=""
+          if [ -n "$LAST" ]; then
+            PREVIOUS_TAG="v${LAST}"
+          fi
+          echo "上一个发布标签：${PREVIOUS_TAG:-无（首次发布）}"
           {
             echo "### 准备发布版本"
             echo "- 版本号：${VERSION}"
             echo "- 标签：${TAG}"
+            echo "- 上一个发布标签：${PREVIOUS_TAG:-无（首次发布）}"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=${PREVIOUS_TAG}" >> "$GITHUB_OUTPUT"
       - name: 校验发布条件
         id: preflight
         env:
@@ -587,6 +597,73 @@ jobs:
               and .SURequireSignedFeed == true
               and .SUVerifyUpdateBeforeExtraction == true' > /dev/null \
             || { echo "打包后的更新器元数据与发布配置不一致" >&2; exit 1; }
+      - name: 汇总版本更新说明
+        env:
+          PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release-work
+          notes_file=".release-work/release-notes.md"
+          if [ -z "$PREVIOUS_TAG" ]; then
+            # 首次发布没有可对比的上一个标签，沿用手工维护的说明
+            if [ -f docs/release-notes.md ]; then
+              cp docs/release-notes.md "$notes_file"
+              echo "首次发布：沿用 docs/release-notes.md 作为更新说明"
+            else
+              printf 'Trident %s 发布。\n' "$RELEASE_VERSION" > "$notes_file"
+            fi
+            exit 0
+          fi
+          if ! git rev-parse -q --verify "refs/tags/${PREVIOUS_TAG}^{commit}" > /dev/null; then
+            echo "历史发布标签 ${PREVIOUS_TAG} 在仓库中不存在，无法汇总提交历史" >&2
+            exit 1
+          fi
+          compare_range="${PREVIOUS_TAG}..HEAD"
+          echo "提交范围：$compare_range"
+
+          # 只汇总用户可感知的变更类型；其余（ci/docs/test/chore 等）不出现在更新弹窗里
+          features="" fixes="" others=""
+          while IFS= read -r subject; do
+            if ! printf '%s\n' "$subject" | grep -Eq '^(feat|fix|perf|refactor|style|build)(\([^)]*\))?!?: '; then
+              continue
+            fi
+            type="$(printf '%s\n' "$subject" | sed -E 's/^([a-z]+)(\([^)]*\))?(!)?: .*/\1/')"
+            scope="$(printf '%s\n' "$subject" | sed -E -n 's/^[a-z]+\(([^)]*)\).*/\1/p')"
+            breaking="$(printf '%s\n' "$subject" | sed -E 's/^[a-z]+(\([^)]*\))?(!)?: .*/\2/')"
+            desc="$(printf '%s\n' "$subject" | sed -E 's/^[a-z]+(\([^)]*\))?(!)?: //')"
+            if [ "$breaking" = "!" ]; then
+              desc="${desc}（不兼容变更）"
+            fi
+            if [ -n "$scope" ]; then
+              entry="- ${desc}（${scope}）"
+            else
+              entry="- $desc"
+            fi
+            case "$type" in
+              feat) features="${features}${entry}"$'\n' ;;
+              fix) fixes="${fixes}${entry}"$'\n' ;;
+              *) others="${others}${entry}"$'\n' ;;
+            esac
+          done < <(git log --no-merges --format=%s "$compare_range")
+
+          if [ -z "$features$fixes$others" ]; then
+            others="- 例行发布，无用户可感知的变更。"$'\n'
+          fi
+
+          emit_section() {
+            if [ -n "$2" ]; then
+              echo "### $1"
+              printf '%s' "$2"
+              echo ""
+            fi
+          }
+          {
+            emit_section "新功能" "$features"
+            emit_section "修复" "$fixes"
+            emit_section "优化" "$others"
+          } > "$notes_file"
+          echo "--- 更新说明预览 ---"
+          cat "$notes_file"
       - name: 生成并校验更新源
         run: |
           set -euo pipefail
@@ -594,7 +671,7 @@ jobs:
           FEED="${ARCHIVES}/appcast-arm64.xml"
           mkdir -p "$ARCHIVES"
           cp "release/${DMG_NAME}" "${ARCHIVES}/${DMG_NAME}"
-          cp docs/release-notes.md "${ARCHIVES}/${DMG_NAME%.dmg}.md"
+          cp .release-work/release-notes.md "${ARCHIVES}/${DMG_NAME%.dmg}.md"
           # Pages 上已有历史更新源时，先确认它能被当前私钥验证
           STATUS="$(curl -sSL --retry 3 -o "$FEED" -w '%{http_code}' "https://zongzhu318.github.io/Trident/stable/appcast-arm64.xml" || true)"
           if [ "$STATUS" = "200" ]; then
@@ -651,7 +728,7 @@ jobs:
         run: |
           set -euo pipefail
           # 先建草稿传产物，确认无误后转正；发布产物不可变，绝不覆盖
-          gh release create "$RELEASE_TAG" --verify-tag --draft --title "Trident ${RELEASE_VERSION}" --notes-file docs/release-notes.md
+          gh release create "$RELEASE_TAG" --verify-tag --draft --title "Trident ${RELEASE_VERSION}" --notes-file .release-work/release-notes.md
           gh release upload "$RELEASE_TAG" \
             ".release-work/archives/${DMG_NAME}" \
             ".release-work/archives/appcast-arm64.xml" \
