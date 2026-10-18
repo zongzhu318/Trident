@@ -13,12 +13,8 @@ import "@xterm/xterm/css/xterm.css";
 import type { Session, Transfer } from "./types";
 import FileBrowser from "./FileBrowser";
 import { useTheme, terminalThemes } from "./theme";
+import { errorText } from "./errors";
 const api = window.trident;
-export const errorText = (e: unknown) =>
-  String(e instanceof Error ? e.message : e).replace(
-    /^Error invoking remote method '[^']+': Error: /,
-    "",
-  );
 
 function TerminalPane({
   id,

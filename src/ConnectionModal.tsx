@@ -1,12 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { Check, Folder, LoaderCircle, ShieldCheck, X, Zap } from "lucide-react";
 import type { Profile, Credentials } from "./types";
+import { errorText } from "./errors";
 const api = window.trident;
-const message = (e: unknown) =>
-  String(e instanceof Error ? e.message : e).replace(
-    /^Error invoking remote method '[^']+': Error: /,
-    "",
-  );
 export const protocolLabel = (p: Profile) =>
   p.protocol === "ssh" ? "SSH / SFTP" : p.protocol.toUpperCase();
 export default function ConnectionModal({
@@ -84,7 +80,7 @@ export default function ConnectionModal({
       if (connecting) await onConnect(value, credentials, save, remember);
       else await onSave(value, remember ? credentials : {}, remember);
     } catch (e) {
-      setError(message(e));
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -242,7 +238,7 @@ export default function ConnectionModal({
                       void api
                         .chooseKey()
                         .then((p) => p && update("keyPath", p))
-                        .catch((e) => setError(message(e)))
+                        .catch((e) => setError(errorText(e)))
                     }
                   >
                     <Folder size={16} />

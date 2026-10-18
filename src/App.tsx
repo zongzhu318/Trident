@@ -25,13 +25,9 @@ import BackupModal from "./BackupModal";
 import SessionView from "./SessionView";
 import type { Credentials, Profile, Session } from "./types";
 import { useTheme, type ThemeMode } from "./theme";
+import { errorText } from "./errors";
 
 const api = window.trident;
-const errorText = (error: unknown) =>
-  String(error instanceof Error ? error.message : error).replace(
-    /^Error invoking remote method '[^']+': Error: /,
-    "",
-  );
 export default function App() {
   const theme = useTheme();
   const [profiles, setProfiles] = useState<Profile[]>([]);

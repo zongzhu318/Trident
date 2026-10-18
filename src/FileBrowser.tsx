@@ -15,12 +15,8 @@ import {
   X,
 } from "lucide-react";
 import type { RemoteFile, Transfer } from "./types";
+import { errorText } from "./errors";
 const api = window.trident;
-const errorText = (e: unknown) =>
-  String(e instanceof Error ? e.message : e).replace(
-    /^Error invoking remote method '[^']+': Error: /,
-    "",
-  );
 const join = (parent: string, name: string) =>
   `${parent === "/" ? "" : parent}/${name}`;
 const sizeText = (size: number) =>

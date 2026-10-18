@@ -214,9 +214,7 @@ async function decodeBackup(text, password) {
 }
 module.exports = {
   makeVault,
-  credentials,
   relevant,
-  binding,
   publicProfile,
   encodeBackup,
   decodeBackup,

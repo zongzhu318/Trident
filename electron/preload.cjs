@@ -48,9 +48,4 @@ contextBridge.exposeInMainWorld("trident", {
   mkdir: invoke("sftp:mkdir"),
   rename: invoke("files:rename"),
   remove: invoke("files:remove"),
-  onEvent: (callback) => {
-    const listener = (_event, payload) => callback(payload);
-    ipcRenderer.on("session:event", listener);
-    return () => ipcRenderer.removeListener("session:event", listener);
-  },
 });

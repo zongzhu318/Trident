@@ -81,7 +81,6 @@ declare global {
       mkdir(id: string, path: string, name: string): Promise<void>;
       rename(id: string, path: string, name: string): Promise<void>;
       remove(id: string, path: string): Promise<boolean>;
-      onEvent(callback: (event: SessionEvent) => void): () => void;
     };
   }
 }
