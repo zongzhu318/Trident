@@ -497,9 +497,6 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
-      electron_config_cache: ${{ runner.temp }}/electron-cache
-      ELECTRON_CACHE: ${{ runner.temp }}/electron-cache
-      ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/electron-builder-cache
     steps:
       - name: 检出同一待发布提交
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -511,6 +508,14 @@ jobs:
         with:
           node-version: "22.22.3"
           cache: npm
+      - name: 配置 Windows 构建缓存目录
+        shell: pwsh
+        run: |
+          $electronCache = Join-Path $env:RUNNER_TEMP 'electron-cache'
+          $builderCache = Join-Path $env:RUNNER_TEMP 'electron-builder-cache'
+          "electron_config_cache=$electronCache" >> $env:GITHUB_ENV
+          "ELECTRON_CACHE=$electronCache" >> $env:GITHUB_ENV
+          "ELECTRON_BUILDER_CACHE=$builderCache" >> $env:GITHUB_ENV
       - name: 缓存 Electron 与 NSIS 构建工具
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
