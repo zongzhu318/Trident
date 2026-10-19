@@ -13,7 +13,8 @@
     "test:ui": "npm run build && node scripts/launch.cjs scripts/smoke.cjs",
     "format": "prettier --write src electron tests scripts index.html package.json tsconfig.json vite.config.ts README.md",
     "package:mac": "npm run build && electron-builder --mac dir",
-    "package:win": "npm run build && electron-builder --win nsis --x64 --publish never"
+    "package:win": "npm run build && npm run package:win:built --",
+    "package:win:built": "electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "basic-ftp": "^6.2.3",

@@ -12,6 +12,10 @@
 
 新增的 `build-windows` job 在 `windows-2022` 上运行，使用 prepare 阶段的同一个提交和版本号，不读取 Sparkle 私钥。它执行 Windows 协议/UI 测试，构建 `Trident-<版本>-windows-x64-setup.exe`，再静默安装、启动实际安装的应用检查版本/UI/DPAPI、退出并卸载。两个平台构建成功后，publish job 才创建标签并上传所有资产，SHA256SUMS 同时覆盖 DMG、exe 和 macOS appcast。
 
+Windows CI 和发布任务缓存 Electron 下载包及 electron-builder / NSIS 工具，按系统、架构和 `package-lock.json` 区分；首次运行仍需下载。UI 测试构建的前端直接交给 `npm run package:win:built` 打包，避免重复构建。该命令要求已有最新 `dist/`，本地完整打包仍使用 `npm run package:win`。
+
+UI 测试和安装验证各设 5 分钟的步骤超时。若日志已显示 `UI smoke passed` 却迟迟不进入打包步骤，应检查测试退出流程：不能先销毁最后一个窗口再调用 `app.exit()`，这会在 Windows 上触发带连接确认框的 `app.quit()`。测试现在直接调用 `app.exit()`；正常应用的退出确认仍然保留。首次下载过慢也可能触发步骤超时，可通过步骤日志区分下载、测试和安装问题。
+
 Windows 10 / 11 x64 安装向导支持选择目录、桌面和开始菜单快捷方式，按用户安装；卸载保留配置。Windows 使用「下载新版本…」跳转 Releases 手动安装新版；Sparkle feed 仍只包含 macOS 包，不能把 Windows exe 写入该 feed。本次未接入 Windows 自动更新，也未配置 Windows 代码签名证书。
 
 ## 一次性配置

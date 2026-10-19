@@ -233,6 +233,7 @@ jobs:
       - name: 安装项目依赖
         run: npm ci
       - name: 运行 UI 冒烟测试
+        timeout-minutes: 5
         run: npm run test:ui
       - name: 编译 Sparkle 原生桥接
         run: |
@@ -496,6 +497,9 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      electron_config_cache: ${{ runner.temp }}/electron-cache
+      ELECTRON_CACHE: ${{ runner.temp }}/electron-cache
+      ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/electron-builder-cache
     steps:
       - name: 检出同一待发布提交
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -507,13 +511,25 @@ jobs:
         with:
           node-version: "22.22.3"
           cache: npm
+      - name: 缓存 Electron 与 NSIS 构建工具
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ env.ELECTRON_CACHE }}
+            ${{ env.ELECTRON_BUILDER_CACHE }}
+          key: windows-packaging-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            windows-packaging-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: 安装依赖并测试 Windows 功能
         run: npm ci
       - run: npm test
-      - run: npm run test:ui
+      - name: 构建前端并运行 UI 冒烟测试
+        timeout-minutes: 5
+        run: npm run test:ui
       - name: 构建 NSIS exe 安装程序
-        run: npm run package:win -- "--config.extraMetadata.version=$env:RELEASE_VERSION" "--config.buildVersion=$env:RELEASE_VERSION"
+        run: npm run package:win:built -- "--config.electronDownload.cache=$env:ELECTRON_CACHE" "--config.extraMetadata.version=$env:RELEASE_VERSION" "--config.buildVersion=$env:RELEASE_VERSION"
       - name: 验证安装、实际应用启动和卸载
+        timeout-minutes: 5
         run: ./scripts/test-windows-installer.ps1
       - name: 上传 Windows 安装包
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

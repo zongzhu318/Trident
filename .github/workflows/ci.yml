@@ -22,9 +22,8 @@ jobs:
         run: npm ci
       - name: 运行单元测试
         run: npm test
-      - name: 构建应用
-        run: npm run build
       - name: 运行 UI 冒烟测试
+        timeout-minutes: 5
         run: npm run test:ui
   windows:
     name: Windows 安装包与功能验证
@@ -32,18 +31,35 @@ jobs:
     timeout-minutes: 30
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      electron_config_cache: ${{ runner.temp }}/electron-cache
+      ELECTRON_CACHE: ${{ runner.temp }}/electron-cache
+      ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/electron-builder-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.22.3"
           cache: npm
+      - name: 缓存 Electron 与 NSIS 构建工具
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ env.ELECTRON_CACHE }}
+            ${{ env.ELECTRON_BUILDER_CACHE }}
+          key: windows-packaging-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            windows-packaging-v1-${{ runner.os }}-${{ runner.arch }}-
       - run: npm ci
       - run: npm test
-      - run: npm run test:ui
+      - name: 构建前端并运行 UI 冒烟测试
+        timeout-minutes: 5
+        run: npm run test:ui
       - name: 设置安装测试版本
         run: |
           $version = node -p "require('./package.json').version"
           "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
-      - run: npm run package:win
-      - run: ./scripts/test-windows-installer.ps1
+      - name: 使用已验证的前端构建 NSIS 安装包
+        run: npm run package:win:built -- "--config.electronDownload.cache=$env:ELECTRON_CACHE"
+      - name: 验证安装、启动和卸载
+        timeout-minutes: 5
+        run: ./scripts/test-windows-installer.ps1

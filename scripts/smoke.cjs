@@ -1,5 +1,5 @@
 // Run with Electron after building. Uses temporary app data and captures the UI.
-const { app, BrowserWindow, dialog, nativeTheme } = require("electron");
+const { app, dialog, nativeTheme } = require("electron");
 const startFTP = require("../tests/helpers/ftp-server.cjs");
 const startTerminal = require("../tests/helpers/terminal-server.cjs");
 const fs = require("node:fs");
@@ -307,7 +307,9 @@ app.on("browser-window-created", (_event, window) => {
         `UI smoke passed: light/dark/system themes, FTP operations, encrypted credentials/backups, SSH bulk output and background tabs. Screenshots: ${temp}`,
       );
       clearTimeout(timer);
-      for (const win of BrowserWindow.getAllWindows()) win.destroy();
+      // Exit directly: destroying the last window first triggers app.quit() on
+      // Windows, which can block on the active-session confirmation dialog.
+      // app.exit() closes all windows without the interactive quit handlers.
       app.exit(0);
     } catch (error) {
       ftpServer?.close();
