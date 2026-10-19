@@ -6,6 +6,7 @@ function createUpdater({
   prepareQuit,
   cancelQuit,
   isBusy,
+  openExternal,
   load = require,
   resumeGraceMs = 10000,
 }) {
@@ -59,6 +60,21 @@ function createUpdater({
       bridge?.setBusy(isBusy());
     },
     menu() {
+      if (process.platform === "win32")
+        return [
+          {
+            label: "下载新版本…",
+            click() {
+              Promise.resolve()
+                .then(() =>
+                  openExternal(
+                    "https://github.com/zongzhu318/Trident/releases/latest",
+                  ),
+                )
+                .catch(showError);
+            },
+          },
+        ];
       return [
         {
           label: "检查更新…",

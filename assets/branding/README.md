@@ -14,3 +14,5 @@ npm run package:mac -- --config.electronDist=node_modules/electron/dist
 ```
 
 日常打包直接使用已生成的资源，无需安装 Pillow。
+
+- `build/icon.ico`：Windows 多尺寸图标（16–256 像素），用于 exe 和 NSIS 安装程序，来自同一透明 Logo。

@@ -164,6 +164,9 @@ svg {
 .traffic-space {
   width: 98px;
 }
+[data-platform="other"] .traffic-space {
+  width: 20px;
+}
 .brand-mark {
   display: block;
   width: 28px;

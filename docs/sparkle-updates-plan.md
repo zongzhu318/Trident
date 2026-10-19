@@ -6,6 +6,14 @@
 
 代码和流水线可在配置下列项目后发布。自动化测试不能代替两份实际发行包之间的安装、重启及 Gatekeeper 验收。未推送代码、配置密钥和运行流水线前，不代表线上更新服务已开通。
 
+## Windows 安装包与共同发布
+
+发布流程现同时构建 macOS arm64 DMG 和 Windows x64 NSIS exe，工作流文件继续使用 `.github/workflows/release-macos.yml`，Actions 显示名称为「发布 macOS / Windows 版本」。沿用手动触发、自动递增版本和自动创建 Tag 的现有流程。
+
+新增的 `build-windows` job 在 `windows-2022` 上运行，使用 prepare 阶段的同一个提交和版本号，不读取 Sparkle 私钥。它执行 Windows 协议/UI 测试，构建 `Trident-<版本>-windows-x64-setup.exe`，再静默安装、启动实际安装的应用检查版本/UI/DPAPI、退出并卸载。两个平台构建成功后，publish job 才创建标签并上传所有资产，SHA256SUMS 同时覆盖 DMG、exe 和 macOS appcast。
+
+Windows 10 / 11 x64 安装向导支持选择目录、桌面和开始菜单快捷方式，按用户安装；卸载保留配置。Windows 使用「下载新版本…」跳转 Releases 手动安装新版；Sparkle feed 仍只包含 macOS 包，不能把 Windows exe 写入该 feed。本次未接入 Windows 自动更新，也未配置 Windows 代码签名证书。
+
 ## 一次性配置
 
 ### 1. 生成 Sparkle 密钥

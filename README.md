@@ -1,6 +1,6 @@
 # Trident
 
-面向 macOS 的 SSH 终端与 SFTP / FTP / FTPS 文件管理桌面应用，参考 Xshell / Xftp 的连接管理、多会话和文件传输工作方式。
+面向 macOS / Windows 的 SSH 终端与 SFTP / FTP / FTPS 文件管理桌面应用，参考 Xshell / Xftp 的连接管理、多会话和文件传输工作方式。
 
 ## 启动
 
@@ -28,11 +28,36 @@ npm run package:mac
 
 ## GitHub Actions 与 Sparkle 更新
 
-0.0.1 起提供 Sparkle 原生更新接入。配置 `SPARKLE_PUBLIC_KEY` Variable、`SPARKLE_PRIVATE_KEY` Secret 并开启 GitHub Pages 后，在 Actions 中运行「Release macOS (Sparkle)」即可构建发布（无需手动打 Tag）。详细步骤见 [更新部署文档](docs/sparkle-updates-plan.md)。
+0.0.1 起提供 Sparkle 原生更新接入。配置 `SPARKLE_PUBLIC_KEY` Variable、`SPARKLE_PRIVATE_KEY` Secret 并开启 GitHub Pages 后，在 Actions 中运行「发布 macOS / Windows 版本」即可构建发布（无需手动打 Tag）。详细步骤见 [更新部署文档](docs/sparkle-updates-plan.md)。
 
 当前发行流水线支持 arm64，应用使用 ad-hoc 签名，更新包和清单使用 Sparkle Ed25519 签名；**不需要 Apple 证书，也不进行 Apple 公证**。首次安装可能需要在 macOS「隐私与安全性」中允许打开。
 
 发行版通过顶部「Trident → 检查更新…」更新，自动检查由用户自行开启。有连接时需先完成操作并断开连接。0.0.1 为首个发布版，无旧版本需要手动迁移。
+
+## Windows 安装包
+
+支持 Windows 10 / 11 x64。GitHub Actions 手动运行「发布 macOS / Windows 版本」后，两个平台使用相同版本号和提交构建；两边都成功才创建 Tag 并发布 Release。下载资产包括：
+
+- `Trident-<版本>-arm64.dmg`：macOS Apple Silicon。
+- `Trident-<版本>-windows-x64-setup.exe`：Windows NSIS 安装程序。
+- `SHA256SUMS`：两个平台安装包与 macOS 更新清单的校验值。
+
+Windows 安装向导可选择安装目录，默认按当前用户安装，不需要管理员权限；创建桌面和开始菜单快捷方式。卸载保留用户配置。当前 exe 未配置 Windows 代码签名，首次运行可能出现 SmartScreen 提示。
+
+在 Windows 本机打包：
+
+```bash
+npm ci
+npm run package:win
+```
+
+产物位于 `release/`。Windows 数据通常存放在 `%APPDATA%/Trident/`；跨设备迁移密码请使用应用内的加密导出/导入，直接复制 `connections.json` 无法跨用户解密。
+
+Sparkle 仅支持 macOS。Windows 菜单「Trident → 下载新版本…」打开 GitHub Releases，下载并运行新版安装程序完成升级，本次未引入 Windows 自动更新。
+
+Windows 使用原生标题栏；应用级快捷键采用 Ctrl+Shift+N/T/W、Ctrl+Shift+1–9 等，避免占用远程终端的 Ctrl+C、Ctrl+W 等按键。
+
+工作流会在 Windows runner 上执行协议/UI 回归，以及 exe 静默安装、实际安装后启动、版本和凭据加密检查、卸载测试。PR 的 Windows CI 不需要发布密钥；完整双平台发布仍需要现有 macOS Sparkle 配置。
 
 ## 功能
 
@@ -43,18 +68,18 @@ npm run package:mac
 - 独立 SFTP 连接，无需服务器允许交互式 shell；FTP / 显式 FTPS 连接使用被动传输模式。
 - 首次连接确认 SHA256 主机指纹，指纹变化再次警告确认。
 - 同一 SSH 连接内打开 SFTP，或使用独立文件连接；支持浏览目录、输入绝对路径、切换隐藏文件、新建目录、重命名、删除文件和空目录。
-- 通过 macOS 文件对话框选择多个本地文件上传、选择本地保存位置下载，显示当前文件进度。
+- 通过系统文件对话框选择多个本地文件上传、选择本地保存位置下载，显示当前文件进度。
 - SFTP 上传使用独占创建拒绝覆盖；FTP / FTPS 上传前检查同名文件（FTP 协议下检查与写入不是原子操作，不能防止其他客户端同时写入）。下载成功后从临时文件移动到目标，失败清理临时文件。
 - 密码和私钥口令可选择加密保存在本机，后续连接无需重复输入；取消保存后清除已有凭据。
-- 连接配置导入导出；包含凭据时使用独立备份密码加密，支持迁移到其他 Mac。
+- 连接配置导入导出；包含凭据时使用独立备份密码加密，支持迁移到其他设备。
 
-打开应用，点击「新建连接」选择 SSH / SFTP / FTP / FTPS、填写服务器和认证信息。勾选「在本机保存密码 / 私钥口令」即可记住凭据。SSH / SFTP 首次连接前请向服务器管理员核对指纹。终端支持 ⌘C / ⌘V；Ctrl+C 中断远程命令。文件列表单击选中后可通过工具栏下载、重命名或删除，双击目录打开、双击普通文件下载。删除前需确认，非空目录不会递归删除。
+打开应用，点击「新建连接」选择 SSH / SFTP / FTP / FTPS、填写服务器和认证信息。勾选「在本机保存密码 / 私钥口令」即可记住凭据。SSH / SFTP 首次连接前请向服务器管理员核对指纹。终端在 macOS 上使用 ⌘C / ⌘V、Windows 上使用 Ctrl+Shift+C / Ctrl+Shift+V 复制粘贴；Ctrl+C 中断远程命令。文件列表单击选中后可通过工具栏下载、重命名或删除，双击目录打开、双击普通文件下载。删除前需确认，非空目录不会递归删除。
 
 FTP 是明文协议；需要加密传输请选择 SFTP 或 FTPS。FTPS 使用显式 TLS，默认端口 21，严格验证服务器证书，不会自动降级为明文 FTP。
 
 ## 本地凭据与备份
 
-本地密码及私钥口令使用 Electron `safeStorage` 加密后写入 `connections.json` 的 `secret` 字段；macOS 的加密密钥由系统钥匙串保护。加密不可用时明确报错，不会改为明文保存。界面只获取「是否已保存」标记，不读取已存密码明文；连接时在主进程解密。修改主机、端口、协议、用户名、认证方式或私钥路径后，不会沿用旧目标的凭据。
+本地密码及私钥口令使用 Electron `safeStorage` 加密后写入 `connections.json` 的 `secret` 字段；macOS 使用系统钥匙串保护密钥，Windows 使用 DPAPI 保护当前用户的凭据。加密不可用时明确报错，不会改为明文保存。界面只获取「是否已保存」标记，不读取已存密码明文；连接时在主进程解密。修改主机、端口、协议、用户名、认证方式或私钥路径后，不会沿用旧目标的凭据。
 
 在连接管理页面点击「导出连接」：
 
@@ -69,7 +94,7 @@ FTP 是明文协议；需要加密传输请选择 SFTP 或 FTPS。FTPS 使用显
 
 - `connections.json`：协议、主机、用户名、端口、私钥路径，以及可选的加密凭据。
 - `known-hosts.json`：本应用信任的服务器指纹，与 OpenSSH 的 `known_hosts` 独立。
-- `preferences.json`：外观偏好，默认跟随 macOS 系统主题。
+- `preferences.json`：外观偏好，默认跟随系统主题。
 
 SSH Agent 需要启动应用的环境中存在 `SSH_AUTH_SOCK`，并已执行 `ssh-add`。
 

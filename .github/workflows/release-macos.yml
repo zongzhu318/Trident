@@ -1,4 +1,4 @@
-name: 发布 macOS 版本
+name: 发布 macOS / Windows 版本
 on:
   workflow_dispatch:
     inputs:
@@ -486,9 +486,45 @@ jobs:
             release/*.dmg
             release/Trident-app.tar.gz
           retention-days: 7
+  build-windows:
+    name: Windows x64 安装包
+    needs: [prepare, test]
+    runs-on: windows-2022
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: 检出同一待发布提交
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - name: 配置 Node.js 环境
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.22.3"
+          cache: npm
+      - name: 安装依赖并测试 Windows 功能
+        run: npm ci
+      - run: npm test
+      - run: npm run test:ui
+      - name: 构建 NSIS exe 安装程序
+        run: npm run package:win -- "--config.extraMetadata.version=$env:RELEASE_VERSION" "--config.buildVersion=$env:RELEASE_VERSION"
+      - name: 验证安装、实际应用启动和卸载
+        run: ./scripts/test-windows-installer.ps1
+      - name: 上传 Windows 安装包
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-release
+          path: release/Trident-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
+          if-no-files-found: error
+          retention-days: 7
   publish:
     name: 发布（Tag 与 Releases）
-    needs: [prepare, build]
+    needs: [prepare, build, build-windows]
     runs-on: macos-latest
     timeout-minutes: 15
     environment: release
@@ -498,6 +534,7 @@ jobs:
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
       DMG_NAME: Trident-${{ needs.prepare.outputs.version }}-arm64.dmg
+      EXE_NAME: Trident-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
       GH_TOKEN: ${{ github.token }}
       SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
       SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
@@ -534,6 +571,11 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: macos-release
+          path: release
+      - name: 下载 Windows 安装包
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-release
           path: release
       - name: 解包应用目录
         run: |
@@ -723,6 +765,7 @@ jobs:
           printf '%s\n' "$SPARKLE_PRIVATE_KEY" | vendor/sparkle/bin/sign_update --ed-key-file - --verify "${ARCHIVES}/${DMG_NAME}" "$SIGNATURE"
           {
             shasum -a 256 "${ARCHIVES}/${DMG_NAME}" "${ARCHIVES}/appcast-arm64.xml" | sed "s#${ARCHIVES}/##"
+            shasum -a 256 "release/${EXE_NAME}" | sed "s#release/##"
           } > "${ARCHIVES}/SHA256SUMS"
       - name: 发布正式 Release
         run: |
@@ -731,6 +774,7 @@ jobs:
           gh release create "$RELEASE_TAG" --verify-tag --draft --title "Trident ${RELEASE_VERSION}" --notes-file .release-work/release-notes.md
           gh release upload "$RELEASE_TAG" \
             ".release-work/archives/${DMG_NAME}" \
+            "release/${EXE_NAME}" \
             ".release-work/archives/appcast-arm64.xml" \
             ".release-work/archives/SHA256SUMS"
           gh release edit "$RELEASE_TAG" --draft=false --latest
@@ -740,12 +784,14 @@ jobs:
           # 更新源只有在正式产物可下载后才允许部署
           curl --fail --location --head --retry 5 --retry-all-errors \
             "https://github.com/zongzhu318/Trident/releases/download/${RELEASE_TAG}/${DMG_NAME}" > /dev/null
+          curl --fail --location --head --retry 5 --retry-all-errors \
+            "https://github.com/zongzhu318/Trident/releases/download/${RELEASE_TAG}/${EXE_NAME}" > /dev/null
           PAGES=".release-work/pages"
           mkdir -p "${PAGES}/stable"
           cp .release-work/archives/appcast-arm64.xml "${PAGES}/stable/appcast-arm64.xml"
           touch "${PAGES}/.nojekyll"
           cat > "${PAGES}/index.html" <<'HTML'
-          <!doctype html><meta charset="utf-8"><title>Trident 更新</title><a href="https://github.com/zongzhu318/Trident/releases/latest">下载 Trident for macOS</a>
+          <!doctype html><meta charset="utf-8"><title>Trident 更新</title><a href="https://github.com/zongzhu318/Trident/releases/latest">下载 Trident for macOS / Windows</a>
           HTML
       - name: 上传 Pages 部署产物
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

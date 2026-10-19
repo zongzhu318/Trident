@@ -1,3 +1,4 @@
+import { appModifier, shortcutPrefix } from "./platform";
 import { useEffect, useState } from "react";
 import {
   ArrowDownToLine,
@@ -60,30 +61,35 @@ export default function App() {
   }
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
-      if (event.metaKey && event.key === "n") {
+      const digit = /^[1-9]$/.test(event.key)
+        ? event.key
+        : /^Digit[1-9]$/.test(event.code)
+          ? event.code.slice(-1)
+          : "";
+      if (appModifier(event) && event.key.toLowerCase() === "n") {
         event.preventDefault();
         setModal({ connect: false });
       }
-      if (event.metaKey && event.key === "t") {
+      if (appModifier(event) && event.key.toLowerCase() === "t") {
         event.preventDefault();
         setModal({ connect: true });
       }
-      if (event.metaKey && /^[1-9]$/.test(event.key)) {
-        const session = sessions[Number(event.key) - 1];
+      if (appModifier(event) && digit) {
+        const session = sessions[Number(digit) - 1];
         if (session) {
           event.preventDefault();
           setActive(session.id);
         }
       }
       if (
-        event.metaKey &&
+        appModifier(event) &&
         event.shiftKey &&
         (event.code === "BracketRight" || event.code === "BracketLeft")
       ) {
         event.preventDefault();
         stepSession(event.code === "BracketRight" ? 1 : -1);
       }
-      if (event.metaKey && event.key === "w") {
+      if (appModifier(event) && event.key.toLowerCase() === "w") {
         const session = sessions.find((s) => s.id === active);
         if (session) {
           event.preventDefault();
@@ -296,7 +302,7 @@ export default function App() {
                   onClick={() => setModal({ connect: false })}
                 >
                   <Plus size={17} />
-                  新建连接<span className="shortcut">⌘ N</span>
+                  新建连接<span className="shortcut">{shortcutPrefix} N</span>
                 </button>
               </div>
               <div className="quick-connect">
@@ -520,8 +526,9 @@ export default function App() {
               指纹，再选择信任。密码和私钥口令可勾选加密保存在本机磁盘。
             </p>
             <p>
-              终端支持交互式命令、颜色、Vim / htop 等全屏工具，以及 ⌘C / ⌘V
-              复制粘贴。按 Ctrl+C 中断远程命令。
+              终端支持交互式命令、颜色、Vim / htop 等全屏工具，以及{" "}
+              {shortcutPrefix}C / {shortcutPrefix}V 复制粘贴。按 Ctrl+C
+              中断远程命令。
             </p>
             <p>
               文件面板支持目录浏览、新建目录、上传下载、重命名和删除文件或空目录。选中文件后使用工具栏操作；双击目录进入，双击普通文件下载。符号链接不打开。FTP

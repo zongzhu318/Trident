@@ -106,7 +106,7 @@ export default function BackupModal({
                   </label>
                   <p className="inline-note">
                     未勾选时仅导出连接配置。包含凭据时，整个备份使用独立的备份密码加密，支持在其他
-                    Mac 导入。
+                    设备导入。
                   </p>
                 </>
               ) : (

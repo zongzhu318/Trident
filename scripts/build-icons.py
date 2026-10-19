@@ -1,8 +1,9 @@
-"""Extract the supplied blue logo and build macOS icons (Python + Pillow)."""
+"""Extract the supplied blue logo and build macOS / Windows icons (Python + Pillow)."""
 
 from pathlib import Path
 import subprocess
 import tempfile
+import sys
 
 from PIL import Image, ImageChops, ImageFilter
 
@@ -54,9 +55,13 @@ def centered(size, content_size):
 (ROOT / "build").mkdir(exist_ok=True)
 centered(1024, 1024).save(ROOT / "assets/branding/logo.png")
 centered(128, 128).save(ROOT / "public/logo.png")
+centered(256, 256).save(ROOT / "build/icon.ico", sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])
 # Transparent breathing room keeps the Dock icon aligned with other macOS apps.
 icon = centered(1024, 864)
 icon.save(ROOT / "build/icon.png")
+if sys.platform != "darwin":
+    print("Generated PNG and Windows ICO assets; ICNS generation requires macOS")
+    sys.exit(0)
 with tempfile.TemporaryDirectory(prefix="trident-icons-") as temporary:
     iconset = Path(temporary) / "Trident.iconset"
     iconset.mkdir()
@@ -65,4 +70,4 @@ with tempfile.TemporaryDirectory(prefix="trident-icons-") as temporary:
             suffix = "@2x" if scale == 2 else ""
             icon.resize((size * scale, size * scale), Image.Resampling.LANCZOS).save(iconset / f"icon_{size}x{size}{suffix}.png")
     subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(ROOT / "build/icon.icns")], check=True)
-print("Generated logo.png, public/logo.png, build/icon.png and build/icon.icns")
+print("Generated logo.png, public/logo.png, build/icon.png, build/icon.ico and build/icon.icns")

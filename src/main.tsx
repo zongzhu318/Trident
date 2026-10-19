@@ -2,6 +2,8 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./styles.css";
 import { applyTheme, ThemeProvider } from "./theme";
+import { isMac } from "./platform";
+document.documentElement.dataset.platform = isMac ? "mac" : "other";
 // 退出准备或 Sparkle 恢复安装期间主进程会短暂拒绝 IPC，需等待其结束。
 const MAX_ATTEMPTS = 5;
 async function getThemeWithRetry() {

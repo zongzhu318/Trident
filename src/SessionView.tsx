@@ -1,3 +1,4 @@
+import { appModifier } from "./platform";
 import { memo, useEffect, useRef, useState } from "react";
 import {
   Globe,
@@ -50,7 +51,7 @@ function TerminalPane({
     terminal.current = term;
     addon.current = fit;
     term.attachCustomKeyEventHandler(
-      (e) => !(e.metaKey && ["c", "v", "a"].includes(e.key.toLowerCase())),
+      (e) => !(appModifier(e) && ["c", "v", "a"].includes(e.key.toLowerCase())),
     );
     let fitFrame = 0;
     let lastSize = "";

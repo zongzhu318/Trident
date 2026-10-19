@@ -101,9 +101,38 @@ test("development builds expose an explanation without loading native updates", 
     load: assert.fail,
   });
   updater.assertCanConnect();
+  if (process.platform === "win32") {
+    assert.equal(updater.menu()[0].label, "下载新版本…");
+    return;
+  }
   updater.menu()[0].click();
   assert.match(errors[0], /未配置/);
   assert.equal(updater.menu()[1].enabled, false);
+});
+
+test("Windows opens the fixed release page and never loads Sparkle", async () => {
+  const original = process.platform;
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    const opened = [];
+    const updater = createUpdater({
+      app: { isPackaged: true },
+      dialog: { showErrorBox: assert.fail },
+      prepareQuit: assert.fail,
+      isBusy: () => false,
+      load: assert.fail,
+      openExternal: async (url) => opened.push(url),
+    });
+    updater.assertCanConnect();
+    assert.equal(updater.menu().length, 1);
+    updater.menu()[0].click();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(opened, [
+      "https://github.com/zongzhu318/Trident/releases/latest",
+    ]);
+  } finally {
+    Object.defineProperty(process, "platform", { value: original });
+  }
 });
 
 test("resume that fails to terminate the app restores availability", async () => {

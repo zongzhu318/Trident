@@ -6,6 +6,7 @@ const {
   Menu,
   safeStorage,
   nativeTheme,
+  shell,
 } = require("electron");
 const { Client } = require("ssh2");
 const { Client: FTPClient } = require("basic-ftp");
@@ -650,8 +651,12 @@ function createWindow() {
     minHeight: 680,
     title: "Trident",
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#111318" : "#ffffff",
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 20, y: 21 },
+    ...(process.platform === "darwin"
+      ? { titleBarStyle: "hiddenInset", trafficLightPosition: { x: 20, y: 21 } }
+      : {
+          titleBarStyle: "default",
+          icon: path.join(__dirname, "../dist/logo.png"),
+        }),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -707,6 +712,7 @@ app
     updater = createUpdater({
       app,
       dialog,
+      openExternal: (url) => shell.openExternal(url),
       prepareQuit: quitter.prepare,
       cancelQuit: quitter.cancelPreparation,
       isBusy: () => sessions.size > 0,
@@ -719,11 +725,15 @@ app
             { role: "about" },
             ...updater.menu(),
             { type: "separator" },
-            { role: "services" },
-            { type: "separator" },
-            { role: "hide" },
-            { role: "hideOthers" },
-            { type: "separator" },
+            ...(process.platform === "darwin"
+              ? [
+                  { role: "services" },
+                  { type: "separator" },
+                  { role: "hide" },
+                  { role: "hideOthers" },
+                  { type: "separator" },
+                ]
+              : []),
             { role: "quit" },
           ],
         },
@@ -734,9 +744,24 @@ app
             { role: "redo" },
             { type: "separator" },
             { role: "cut" },
-            { role: "copy" },
-            { role: "paste" },
-            { role: "selectAll" },
+            {
+              role: "copy",
+              ...(process.platform === "win32"
+                ? { accelerator: "Ctrl+Shift+C" }
+                : {}),
+            },
+            {
+              role: "paste",
+              ...(process.platform === "win32"
+                ? { accelerator: "Ctrl+Shift+V" }
+                : {}),
+            },
+            {
+              role: "selectAll",
+              ...(process.platform === "win32"
+                ? { accelerator: "Ctrl+Shift+A" }
+                : {}),
+            },
           ],
         },
         {

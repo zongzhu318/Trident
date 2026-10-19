@@ -26,3 +26,24 @@ jobs:
         run: npm run build
       - name: 运行 UI 冒烟测试
         run: npm run test:ui
+  windows:
+    name: Windows 安装包与功能验证
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.22.3"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:ui
+      - name: 设置安装测试版本
+        run: |
+          $version = node -p "require('./package.json').version"
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+      - run: npm run package:win
+      - run: ./scripts/test-windows-installer.ps1
