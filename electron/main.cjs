@@ -61,19 +61,19 @@ let configurationQueue = Promise.resolve();
 let updater;
 const quitter = createQuitCoordinator({
   app,
-  confirm: () => {
+  confirm: async () => {
     if (!sessions.size) return true;
-    return (
-      dialog.showMessageBoxSync(window, {
-        type: "warning",
-        message: "断开所有连接并退出？",
-        detail:
-          "退出或安装更新会中断远程终端和正在传输的文件。可取消并在操作完成后重试。",
-        buttons: ["取消", "断开并退出"],
-        defaultId: 0,
-        cancelId: 0,
-      }) === 1
-    );
+    // 异步弹窗：等待用户选择期间主进程保持响应，界面不会被冻结或拒绝请求
+    const { response } = await dialog.showMessageBox(window, {
+      type: "warning",
+      message: "断开所有连接并退出？",
+      detail:
+        "退出或安装更新会中断远程终端和正在传输的文件。可取消并在操作完成后重试。",
+      buttons: ["取消", "断开并退出"],
+      defaultId: 0,
+      cancelId: 0,
+    });
+    return response === 1;
   },
   flush: async () => {
     await configurationQueue;

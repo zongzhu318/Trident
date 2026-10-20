@@ -35,6 +35,7 @@ test("quit waits for persistence, blocks new work and does not duplicate prompts
       prevented++;
     },
   });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.throws(() => q.assertOpen(), /正在保存/);
   assert.equal(closed, 0);
   finish();
@@ -44,6 +45,28 @@ test("quit waits for persistence, blocks new work and does not duplicate prompts
   assert.equal(closed, 1);
   assert.equal(quit, 1);
   app.emit("before-quit", { preventDefault: assert.fail });
+});
+
+test("the renderer stays usable while the quit confirmation is pending", async () => {
+  let resolveConfirm;
+  const app = new EventEmitter();
+  app.quit = () => {};
+  const q = createQuitCoordinator({
+    app,
+    confirm: () =>
+      new Promise((resolve) => {
+        resolveConfirm = resolve;
+      }),
+    flush: async () => {},
+    disconnect: () => {},
+    showError: assert.fail,
+  });
+  app.emit("before-quit", { preventDefault() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  q.assertOpen();
+  resolveConfirm(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.throws(() => q.assertOpen(), /正在保存/);
 });
 
 test("cancel or failed save prevents exit and permits further use", async () => {
