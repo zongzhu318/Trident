@@ -26,13 +26,13 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
       - name: 配置 Node.js 环境
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "22.22.3"
       - name: 读取版本号并生成标签
@@ -176,12 +176,12 @@ jobs:
       contents: read
     steps:
       - name: 检出待发布代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
       - name: 配置 Node.js 环境
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "22.22.3"
           cache: npm
@@ -202,12 +202,12 @@ jobs:
       SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
     steps:
       - name: 检出待发布代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
       - name: 配置 Node.js 环境
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "22.22.3"
           cache: npm
@@ -480,7 +480,7 @@ jobs:
         # 导致下游 codesign 校验报 "bundle format is ambiguous"
         run: tar -czf release/Trident-app.tar.gz -C release/mac-arm64 Trident.app
       - name: 上传编译产物
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: macos-release
           path: |
@@ -499,12 +499,12 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
       - name: 检出同一待发布提交
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
       - name: 配置 Node.js 环境
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "22.22.3"
           cache: npm
@@ -517,7 +517,7 @@ jobs:
           "ELECTRON_CACHE=$electronCache" >> $env:GITHUB_ENV
           "ELECTRON_BUILDER_CACHE=$builderCache" >> $env:GITHUB_ENV
       - name: 缓存 Electron 与 NSIS 构建工具
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache@v5.1.0
         with:
           path: |
             ${{ env.ELECTRON_CACHE }}
@@ -537,7 +537,7 @@ jobs:
         timeout-minutes: 5
         run: ./scripts/test-windows-installer.ps1
       - name: 上传 Windows 安装包与更新元数据
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: windows-release
           path: |
@@ -564,12 +564,12 @@ jobs:
       SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
     steps:
       - name: 检出待发布代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           fetch-depth: 0
       - name: 配置 Node.js 环境
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "22.22.3"
       - name: 获取 Sparkle SDK
@@ -592,12 +592,12 @@ jobs:
           tar -xJf "vendor/Sparkle-${SDK_VERSION}.tar.xz" -C vendor/sparkle
           echo "${SDK_VERSION}:${SDK_SHA256}" > "$MARKER"
       - name: 下载编译产物
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8.0.2
         with:
           name: macos-release
           path: release
       - name: 下载 Windows 安装包
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8.0.2
         with:
           name: windows-release
           path: release
@@ -847,7 +847,7 @@ jobs:
           <!doctype html><meta charset="utf-8"><title>Trident 更新</title><a href="https://github.com/zongzhu318/Trident/releases/latest">下载 Trident for macOS / Windows</a>
           HTML
       - name: 上传 Pages 部署产物
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: .release-work/pages
   pages:
@@ -864,7 +864,7 @@ jobs:
     steps:
       - name: 部署更新源
         id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        uses: actions/deploy-pages@v5.0.1
       - name: 校验线上更新源与 Release 一致
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
