@@ -4,6 +4,8 @@ import {
   Globe,
   LoaderCircle,
   LockKeyhole,
+  PanelRightClose,
+  PanelRightOpen,
   ShieldCheck,
   Terminal,
   X,
@@ -46,7 +48,7 @@ function TerminalPane({
   useEffect(() => {
     const term = new XTerminal({
       cursorBlink: true,
-      fontSize: 13,
+      fontSize: 12,
       fontFamily: '"SF Mono", Menlo, Monaco, monospace',
       lineHeight: 1.4,
       scrollback: 5000,
@@ -174,6 +176,8 @@ const SessionView = memo(function SessionView({
     "connecting",
   );
   const [filesReady, setFilesReady] = useState(false);
+  const [filesVisible, setFilesVisible] = useState(true);
+  const filesToggle = useRef<HTMLButtonElement>(null);
   const [error, setError] = useState("");
   const [transfer, setTransfer] = useState<Transfer | null>(null);
   const visibleRef = useRef(visible);
@@ -245,20 +249,40 @@ const SessionView = memo(function SessionView({
             {session.profile.port}
           </span>
         </div>
-        <span className="session-status">
-          {status === "connecting" ? (
-            <LoaderCircle className="spin" size={13} />
-          ) : session.profile.protocol === "ftp" ? (
-            <Globe size={13} />
-          ) : (
-            <ShieldCheck size={13} />
+        <div className="session-actions">
+          <span className="session-status">
+            {status === "connecting" ? (
+              <LoaderCircle className="spin" size={13} />
+            ) : session.profile.protocol === "ftp" ? (
+              <Globe size={13} />
+            ) : (
+              <ShieldCheck size={13} />
+            )}
+            {status === "connecting"
+              ? "正在连接…"
+              : status === "ready"
+                ? `${session.profile.protocol.toUpperCase()} 已连接`
+                : "已断开"}
+          </span>
+          {hasTerminal && (
+            <button
+              ref={filesToggle}
+              className="secondary small file-panel-toggle"
+              aria-label={filesVisible ? "隐藏文件面板" : "显示文件面板"}
+              title={filesVisible ? "隐藏文件面板，展开终端" : "显示文件面板"}
+              aria-expanded={filesVisible}
+              aria-controls={`files-${session.id}`}
+              onClick={() => setFilesVisible((value) => !value)}
+            >
+              {filesVisible ? (
+                <PanelRightClose size={14} />
+              ) : (
+                <PanelRightOpen size={14} />
+              )}
+              文件面板
+            </button>
           )}
-          {status === "connecting"
-            ? "正在连接…"
-            : status === "ready"
-              ? `${session.profile.protocol.toUpperCase()} 已连接`
-              : "已断开"}
-        </span>
+        </div>
       </div>
       {error && (
         <div className="session-error">
@@ -282,6 +306,15 @@ const SessionView = memo(function SessionView({
           protocol={hasTerminal ? "sftp" : session.profile.protocol}
           enabled={filesReady && status === "ready"}
           transfer={transfer}
+          collapsed={hasTerminal && !filesVisible}
+          onHide={
+            hasTerminal
+              ? () => {
+                  setFilesVisible(false);
+                  filesToggle.current?.focus();
+                }
+              : undefined
+          }
         />
       </div>
       <div className="session-footer">

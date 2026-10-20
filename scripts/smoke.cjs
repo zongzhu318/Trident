@@ -355,6 +355,66 @@ app.on("browser-window-created", (_event, window) => {
           `document.querySelector('.xterm-screen').textContent.includes('BULK_DONE')`,
         ),
       );
+      // Hide without unmounting: retain panel state and resize the live terminal.
+      const terminalWidth = await run(
+        `document.querySelector('.xterm-screen').clientWidth`,
+      );
+      await run(`(() => {
+        window.sshPane = document.querySelector('.terminal-pane').closest('.session');
+        window.savedFilePane = window.sshPane.querySelector('.file-pane');
+        window.savedFilePane.querySelector('.checkbox input').click();
+        window.savedFilePane.querySelector('button[aria-label="隐藏文件面板"]').click();
+      })()`);
+      await waitFor(
+        `window.savedFilePane.hidden && window.savedFilePane.getBoundingClientRect().width === 0 && document.querySelector('.xterm-screen').clientWidth > ${terminalWidth}`,
+      );
+      assert.ok(
+        await run(
+          `document.activeElement === window.sshPane.querySelector('.file-panel-toggle')`,
+        ),
+      );
+      assert.equal(
+        await run(`document.querySelector('.files-only .file-pane').hidden`),
+        false,
+      );
+      const expandedWidth = await run(
+        `document.querySelector('.xterm-screen').clientWidth`,
+      );
+      await run(`window.savedSidebar = document.querySelector('.sidebar')`);
+      assert.equal(
+        await run(
+          `getComputedStyle(document.querySelector('.sidebar-toggle')).getPropertyValue('-webkit-app-region')`,
+        ),
+        "no-drag",
+      );
+      const toggleSidebar = async () => {
+        const point = await run(`(() => {
+          const rect = document.querySelector('.sidebar-toggle').getBoundingClientRect();
+          return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+        })()`);
+        window.webContents.sendInputEvent({
+          type: "mouseDown",
+          button: "left",
+          clickCount: 1,
+          ...point,
+        });
+        window.webContents.sendInputEvent({
+          type: "mouseUp",
+          button: "left",
+          clickCount: 1,
+          ...point,
+        });
+      };
+      await toggleSidebar();
+      await waitFor(
+        `window.savedSidebar.hidden && window.savedSidebar.getBoundingClientRect().width === 0 && document.querySelector('.xterm-screen').clientWidth > ${expandedWidth}`,
+      );
+      assert.equal(
+        await run(
+          `document.querySelector('.sidebar-toggle').getAttribute('aria-expanded')`,
+        ),
+        "false",
+      );
       await run(`document.querySelector('.tabbar > button').click()`);
       await run(
         `window.trident.write('${terminalId}', ${JSON.stringify("BULK\n")})`,
@@ -369,6 +429,41 @@ app.on("browser-window-created", (_event, window) => {
       await waitFor(
         `document.querySelector('.xterm-screen')?.textContent.includes('AFTER_BACKGROUND')`,
       );
+      assert.ok(
+        await run(
+          `window.savedFilePane.hidden && window.savedSidebar.hidden && document.querySelector('.xterm') === window.terminalBeforePalette`,
+        ),
+      );
+      fs.writeFileSync(
+        path.join(temp, "terminal-both-panels-hidden.png"),
+        (await window.webContents.capturePage()).toPNG(),
+      );
+      await toggleSidebar();
+      await waitFor(
+        `!window.savedSidebar.hidden && Math.abs(document.querySelector('.xterm-screen').clientWidth - ${expandedWidth}) < 2`,
+      );
+      assert.ok(
+        await run(
+          `document.querySelector('.sidebar') === window.savedSidebar && window.savedSidebar.querySelectorAll('.connection-nav').length > 0`,
+        ),
+      );
+      fs.writeFileSync(
+        path.join(temp, "terminal-expanded.png"),
+        (await window.webContents.capturePage()).toPNG(),
+      );
+      await run(`window.sshPane.querySelector('.file-panel-toggle').click()`);
+      await waitFor(
+        `!window.savedFilePane.hidden && Math.abs(document.querySelector('.xterm-screen').clientWidth - ${terminalWidth}) < 2`,
+      );
+      assert.ok(
+        await run(
+          `window.sshPane.querySelector('.file-pane') === window.savedFilePane && window.savedFilePane.querySelector('.checkbox input').checked`,
+        ),
+      );
+      await run(`window.sshPane.querySelector('.file-panel-toggle').click()`);
+      await waitFor(`window.savedFilePane.hidden`);
+      await run(`window.sshPane.querySelector('.file-panel-toggle').click()`);
+      await waitFor(`!window.savedFilePane.hidden`);
       fs.writeFileSync(
         path.join(temp, "terminal-dark.png"),
         (await window.webContents.capturePage()).toPNG(),
@@ -377,7 +472,7 @@ app.on("browser-window-created", (_event, window) => {
       const savedImage = await window.webContents.capturePage();
       fs.writeFileSync(path.join(temp, "connections.png"), savedImage.toPNG());
       console.log(
-        `UI smoke passed: app/terminal themes, FTP operations, encrypted credentials/backups, SSH bulk output and background tabs. Screenshots: ${temp}`,
+        `UI smoke passed: app/terminal themes, collapsible sidebar/file panel, FTP operations, encrypted credentials/backups, SSH bulk output and background tabs. Screenshots: ${temp}`,
       );
       clearTimeout(timer);
       // Exit directly: destroying the last window first triggers app.quit() on

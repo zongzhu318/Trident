@@ -172,7 +172,7 @@ svg {
   overflow: hidden;
 }
 .titlebar {
-  height: 60px;
+  height: 35px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -185,19 +185,32 @@ svg {
 }
 .traffic-space {
   width: 98px;
+  flex-shrink: 0;
+}
+.sidebar-toggle {
+  -webkit-app-region: no-drag;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0;
+  border-radius: 5px;
+  color: var(--chrome-muted);
+}
+.sidebar-toggle:hover {
+  background: var(--hover);
 }
 [data-platform="other"] .traffic-space {
   width: 20px;
 }
 .brand-mark {
   display: block;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   object-fit: contain;
   flex-shrink: 0;
 }
 .titlebar strong {
-  font-size: 16px;
+  font-size: 14px;
   letter-spacing: -0.4px;
 }
 .titlebar-sub {
@@ -227,6 +240,9 @@ svg {
   flex-shrink: 0;
   border-right: 1px solid var(--sidebar-border);
   padding: 27px 14px 0;
+}
+.sidebar[hidden] {
+  display: none;
 }
 .workspace-name {
   display: flex;
@@ -1033,6 +1049,14 @@ h2 {
   color: var(--accent-muted);
   white-space: nowrap;
 }
+.session-actions {
+  flex-shrink: 0;
+}
+.file-panel-toggle[aria-expanded="true"] {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--selected);
+}
 .session-content {
   display: flex;
   flex: 1;
@@ -1093,6 +1117,9 @@ h2 {
   border-left: 1px solid var(--sidebar-border);
   background: var(--raised);
   min-height: 0;
+}
+.file-pane[hidden] {
+  display: none;
 }
 .file-toolbar {
   display: flex;

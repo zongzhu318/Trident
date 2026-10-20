@@ -11,6 +11,8 @@ import {
   KeyRound,
   LockKeyhole,
   Sun,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   Plus,
   Search,
@@ -34,6 +36,7 @@ export default function App() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [active, setActive] = useState("home");
+  const [sidebarVisible, setSidebarVisible] = useState(true);
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState<{
     profile?: Profile;
@@ -143,6 +146,20 @@ export default function App() {
     <div className="app">
       <header className="titlebar">
         <div className="traffic-space" />
+        <button
+          className="sidebar-toggle"
+          aria-label={sidebarVisible ? "隐藏连接管理栏" : "显示连接管理栏"}
+          title={sidebarVisible ? "隐藏连接管理栏" : "显示连接管理栏"}
+          aria-expanded={sidebarVisible}
+          aria-controls="connection-sidebar"
+          onClick={() => setSidebarVisible((value) => !value)}
+        >
+          {sidebarVisible ? (
+            <PanelLeftClose size={18} />
+          ) : (
+            <PanelLeftOpen size={18} />
+          )}
+        </button>
         <img
           className="brand-mark"
           src="./logo.png"
@@ -154,7 +171,11 @@ export default function App() {
         <span className="titlebar-right">SSH · SFTP · FTP</span>
       </header>
       <div className="layout">
-        <aside className="sidebar">
+        <aside
+          className="sidebar"
+          id="connection-sidebar"
+          hidden={!sidebarVisible}
+        >
           <div className="workspace-name">
             <div className="workspace-avatar">
               <Command size={18} />

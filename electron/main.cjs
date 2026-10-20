@@ -676,7 +676,7 @@ function createWindow() {
     title: "Trident",
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#111b28" : "#f8f9fc",
     ...(process.platform === "darwin"
-      ? { titleBarStyle: "hiddenInset", trafficLightPosition: { x: 20, y: 21 } }
+      ? { titleBarStyle: "hiddenInset", trafficLightPosition: { x: 20, y: 10 } }
       : {
           titleBarStyle: "default",
           icon: path.join(__dirname, "../dist/logo.png"),

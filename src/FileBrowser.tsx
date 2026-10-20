@@ -9,6 +9,7 @@ import {
   Folder,
   FolderPlus,
   Pencil,
+  PanelRightClose,
   RefreshCw,
   Trash2,
   Unplug,
@@ -30,11 +31,15 @@ const FileBrowser = memo(function FileBrowser({
   protocol,
   enabled,
   transfer,
+  collapsed = false,
+  onHide,
 }: {
   id: string;
   protocol: string;
   enabled: boolean;
   transfer: Transfer | null;
+  collapsed?: boolean;
+  onHide?: () => void;
 }) {
   const [directory, setDirectory] = useState("");
   const [pathInput, setPathInput] = useState("");
@@ -112,10 +117,20 @@ const FileBrowser = memo(function FileBrowser({
   const download = (file: RemoteFile) =>
     perform(() => api.download(id, join(directory, file.name)));
   return (
-    <aside className="file-pane">
+    <aside className="file-pane" id={`files-${id}`} hidden={collapsed}>
       <div className="pane-title">
         <Folder size={14} />
         远程文件<span>{protocol.toUpperCase()}</span>
+        {onHide && (
+          <button
+            className="icon-button"
+            aria-label="隐藏文件面板"
+            title="隐藏文件面板"
+            onClick={onHide}
+          >
+            <PanelRightClose size={15} />
+          </button>
+        )}
       </div>
       <div className="file-toolbar">
         <button
