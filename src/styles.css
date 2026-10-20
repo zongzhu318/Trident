@@ -342,12 +342,16 @@ svg {
   flex: 1;
 }
 .connection-nav {
+  display: flex;
+  align-items: center;
   width: 100%;
   text-align: left;
   justify-content: flex-start;
   padding: 12px 9px;
   gap: 10px;
   border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
 }
 .connection-nav:hover {
   background: var(--hover);
@@ -365,8 +369,17 @@ svg {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.connection-nav > svg {
+.connection-nav .nav-edit {
+  width: 24px;
+  height: 24px;
   margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.connection-nav:hover .nav-edit,
+.connection-nav:focus-visible .nav-edit,
+.connection-nav .nav-edit:focus-visible {
+  opacity: 1;
 }
 .server-dot {
   width: 6px;

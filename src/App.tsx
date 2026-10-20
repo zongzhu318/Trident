@@ -4,7 +4,6 @@ import {
   ArrowDownToLine,
   ArrowRight,
   ArrowUpFromLine,
-  ChevronRight,
   CircleHelp,
   Command,
   Folder,
@@ -120,6 +119,13 @@ export default function App() {
     setActive(id);
     setModal(null);
   }
+  function connectProfile(profile: Profile) {
+    if (profile.hasSavedCredentials || profile.auth === "agent") {
+      void start(profile, {}, false, false);
+    } else {
+      setModal({ profile, connect: true });
+    }
+  }
   async function closeSession(id: string) {
     if (
       !window.confirm("关闭此标签并断开连接？该连接的终端和文件传输会被中断。")
@@ -212,10 +218,18 @@ export default function App() {
               </div>
             ) : (
               profiles.map((p) => (
-                <button
+                <div
                   className="connection-nav"
                   key={p.id}
-                  onClick={() => setModal({ profile: p, connect: true })}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => connectProfile(p)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      connectProfile(p);
+                    }
+                  }}
                 >
                   <span className="server-dot" />
                   <span>
@@ -224,8 +238,18 @@ export default function App() {
                       {p.username}@{p.host}
                     </small>
                   </span>
-                  <ChevronRight size={13} />
-                </button>
+                  <button
+                    className="icon-button nav-edit"
+                    aria-label={`编辑连接 ${p.name}`}
+                    title="编辑"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setModal({ profile: p, connect: false });
+                    }}
+                  >
+                    <Pencil size={13} />
+                  </button>
+                </div>
               ))
             )}
           </div>
@@ -415,11 +439,7 @@ export default function App() {
                           {p.hasSavedCredentials && " · 已存凭据"}
                           {p.group && ` · ${p.group}`}
                         </span>
-                        <button
-                          onClick={() =>
-                            setModal({ profile: p, connect: true })
-                          }
-                        >
+                        <button onClick={() => connectProfile(p)}>
                           连接
                           <ArrowRight size={14} />
                         </button>
