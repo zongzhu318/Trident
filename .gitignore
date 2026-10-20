@@ -10,3 +10,4 @@ build/sparkle-config.json
 *.p12
 *.p8
 *.key
+.qoder/
