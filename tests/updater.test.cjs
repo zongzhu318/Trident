@@ -223,7 +223,7 @@ test("Windows download completion (full or differential fallback) prompts with r
           });
         },
       },
-      prepareQuit: assert.fail,
+      prepareQuit: async () => true,
       isBusy: () => false,
       load: () => fake.module,
     });
@@ -238,6 +238,42 @@ test("Windows download completion (full or differential fallback) prompts with r
     resolveBox({ response: 0 });
     await flush();
     assert.deepEqual(fake.calls.installs, [[true, true]]);
+  } finally {
+    Object.defineProperty(process, "platform", { value: original });
+  }
+});
+
+test("Windows release notes in HTML are converted to plain text for the prompt", async () => {
+  const fake = fakeUpdaterModule();
+  const dialogs = [];
+  const original = process.platform;
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    const updater = createUpdater({
+      app: { isPackaged: true },
+      dialog: {
+        showErrorBox: assert.fail,
+        showMessageBox: async (options) => {
+          dialogs.push(options);
+          return { response: 1 };
+        },
+      },
+      prepareQuit: assert.fail,
+      isBusy: () => false,
+      load: () => fake.module,
+    });
+    fake.emit("update-downloaded", {
+      version: "0.0.11",
+      releaseNotes:
+        "<h3>优化</h3>\n<ul>\n<li>例行发布，无用户可感知的变更。</li>\n</ul>",
+    });
+    await flush();
+    assert.equal(dialogs.length, 1);
+    assert.equal(
+      dialogs[0].detail,
+      "优化\n\n• 例行发布，无用户可感知的变更。",
+    );
+    assert.equal(fake.calls.installs.length, 0);
   } finally {
     Object.defineProperty(process, "platform", { value: original });
   }
@@ -260,7 +296,7 @@ test("Windows install prompt waits for idle sessions before showing", async () =
           return { response };
         },
       },
-      prepareQuit: assert.fail,
+      prepareQuit: async () => true,
       isBusy: () => busy,
       load: () => fake.module,
     });
@@ -273,6 +309,62 @@ test("Windows install prompt waits for idle sessions before showing", async () =
     await flush();
     assert.equal(dialogs.length, 1);
     assert.equal(fake.calls.installs.length, 1);
+  } finally {
+    Object.defineProperty(process, "platform", { value: original });
+  }
+});
+
+test("Windows install confirmation saves state via prepareQuit before quitting", async () => {
+  const fake = fakeUpdaterModule();
+  const order = [];
+  const original = process.platform;
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    const updater = createUpdater({
+      app: { isPackaged: true },
+      dialog: {
+        showErrorBox: assert.fail,
+        showMessageBox: async () => ({ response: 0 }),
+      },
+      prepareQuit: async () => {
+        order.push("prepare");
+        return true;
+      },
+      isBusy: () => false,
+      load: () => fake.module,
+    });
+    fake.autoUpdater.quitAndInstall = (silent, force) => {
+      order.push(["install", silent, force]);
+    };
+    fake.emit("update-downloaded", { version: "1.2.4", releaseNotes: "" });
+    await flush();
+    assert.deepEqual(order, [
+      "prepare",
+      ["install", true, true],
+    ]);
+  } finally {
+    Object.defineProperty(process, "platform", { value: original });
+  }
+});
+
+test("Windows install confirmation aborts without quitting when saving is cancelled", async () => {
+  const fake = fakeUpdaterModule();
+  const original = process.platform;
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    const updater = createUpdater({
+      app: { isPackaged: true },
+      dialog: {
+        showErrorBox: assert.fail,
+        showMessageBox: async () => ({ response: 0 }),
+      },
+      prepareQuit: async () => false,
+      isBusy: () => false,
+      load: () => fake.module,
+    });
+    fake.emit("update-downloaded", { version: "1.2.4", releaseNotes: "" });
+    await flush();
+    assert.equal(fake.calls.installs.length, 0);
   } finally {
     Object.defineProperty(process, "platform", { value: original });
   }
@@ -298,7 +390,7 @@ test("Windows install confirmation re-checks busy state before quitting", async 
           });
         },
       },
-      prepareQuit: assert.fail,
+      prepareQuit: async () => true,
       isBusy: () => busy,
       load: () => fake.module,
     });
