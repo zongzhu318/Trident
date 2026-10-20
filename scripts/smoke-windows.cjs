@@ -97,7 +97,8 @@ child.stderr.on("data", async (data) => {
     assert.equal(result.view.node, "undefined");
     assert.deepEqual(result.view.profiles, []);
     assert.equal(result.vault, true);
-    assert.ok(result.menus.includes("下载新版本…"));
+    assert.ok(result.menus.includes("检查更新…"));
+    assert.ok(!result.menus.includes("下载新版本…"));
     assert.ok(!result.menus.includes("自动检查更新"));
     passed = true;
     await evaluate(

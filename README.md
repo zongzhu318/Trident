@@ -53,7 +53,7 @@ npm run package:win
 
 产物位于 `release/`。Windows 数据通常存放在 `%APPDATA%/Trident/`；跨设备迁移密码请使用应用内的加密导出/导入，直接复制 `connections.json` 无法跨用户解密。
 
-Sparkle 仅支持 macOS。Windows 菜单「Trident → 下载新版本…」打开 GitHub Releases，下载并运行新版安装程序完成升级，本次未引入 Windows 自动更新。
+Sparkle 仅支持 macOS。Windows 通过 electron-updater 提供应用内更新：菜单「Trident → 检查更新…」检查并后台下载，退出后静默安装；Sparkle feed 仍只包含 macOS 包。
 
 Windows 使用原生标题栏；应用级快捷键采用 Ctrl+Shift+N/T/W、Ctrl+Shift+1–9 等，避免占用远程终端的 Ctrl+C、Ctrl+W 等按键。
 
