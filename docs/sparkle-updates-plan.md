@@ -8,7 +8,7 @@
 
 ## Windows 安装包与共同发布
 
-发布流程现同时构建 macOS arm64 DMG 和 Windows x64 NSIS exe，工作流文件继续使用 `.github/workflows/release-macos.yml`，Actions 显示名称为「发布 macOS / Windows 版本」。沿用手动触发、自动递增版本和自动创建 Tag 的现有流程。
+发布流程现同时构建 macOS arm64 DMG 和 Windows x64 NSIS exe，工作流文件为 `.github/workflows/release.yml`，Actions 显示名称为「发布 macOS / Windows 版本」。沿用手动触发、自动递增版本和自动创建 Tag 的现有流程。
 
 新增的 `build-windows` job 在 `windows-2022` 上运行，使用 prepare 阶段的同一个提交和版本号，不读取 Sparkle 私钥。它执行 Windows 协议/UI 测试，构建 `Trident-<版本>-windows-x64-setup.exe`，再静默安装、启动实际安装的应用检查版本/UI/DPAPI、退出并卸载。两个平台构建成功后，publish job 才创建标签并上传所有资产，SHA256SUMS 同时覆盖 DMG、exe 和 macOS appcast。
 
@@ -146,7 +146,7 @@ npm run package:release
 - `native/sparkle-bridge/bridge.mm`：原生 Sparkle / Node-API 桥。
 - `electron/updater.cjs`、`electron/quit-coordinator.cjs`：菜单、会话和退出协调。
 - `scripts/release/`：固定 SDK、原生构建、发布和清单验证。
-- `.github/workflows/ci.yml`、`.github/workflows/release-macos.yml`：CI 与发布。
+- `.github/workflows/ci.yml`、`.github/workflows/release.yml`：CI 与发布。
 - [Sparkle 官方文档](https://sparkle-project.org/documentation/)
 - [发布更新与 EdDSA 签名](https://sparkle-project.org/documentation/publishing/)
 - [程序化接入](https://sparkle-project.org/documentation/programmatic-setup/)
