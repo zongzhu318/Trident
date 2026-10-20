@@ -750,7 +750,20 @@ app
         {
           label: "Trident",
           submenu: [
-            { role: "about" },
+            process.platform === "darwin"
+              ? { role: "about" }
+              : {
+                  label: "关于 Trident",
+                  click: () => {
+                    dialog.showMessageBox(window, {
+                      type: "info",
+                      title: "Trident",
+                      message: "Trident",
+                      // Windows 打包版 app.getVersion() 返回 exe 的 4 段 FileVersion（如 0.0.10.0），去掉补位的 .0
+                      detail: app.getVersion().replace(/\.0$/, ""),
+                    });
+                  },
+                },
             ...updater.menu(),
             { type: "separator" },
             ...(process.platform === "darwin"
