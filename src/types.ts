@@ -41,6 +41,7 @@ declare global {
     trident: {
       getTheme(): Promise<ThemeState>;
       setTheme(mode: ThemeMode): Promise<ThemeState>;
+      setTerminalTheme(id: TerminalThemeId): Promise<ThemeState>;
       onThemeChanged(callback: (theme: ThemeState) => void): () => void;
       acknowledge(id: string, bytes: number): void;
       onSessionEvent(
@@ -85,3 +86,4 @@ declare global {
   }
 }
 import type { ThemeMode, ThemeState } from "./theme";
+import type { TerminalThemeId } from "./terminal-themes";

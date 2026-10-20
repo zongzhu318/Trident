@@ -281,7 +281,7 @@ test(
     const originalLoad = Module._load;
     fs.writeFileSync(
       path.join(root, "preferences.json"),
-      JSON.stringify({ theme: "dark" }),
+      JSON.stringify({ theme: "dark", terminalTheme: "nord" }),
     );
     Module._load = function (name, ...args) {
       return name === "electron"
@@ -317,6 +317,7 @@ test(
       "appearance preferences validate, persist and notify the renderer",
       async () => {
         assert.equal((await invoke("theme:get")).mode, "dark");
+        assert.equal((await invoke("theme:get")).terminalTheme, "nord");
         assert.equal((await invoke("theme:set", "light")).mode, "light");
         assert.equal(
           JSON.parse(
@@ -330,6 +331,35 @@ test(
         electron.nativeTheme.shouldUseDarkColors = false;
         electron.nativeTheme.emit("updated");
         assert.equal(events.at(-1).effective, "light");
+      },
+    );
+
+    await t.test(
+      "terminal colors persist independently and concurrent appearance changes preserve both preferences",
+      async () => {
+        assert.equal((await invoke("theme:get")).terminalTheme, "nord");
+        await Promise.all([
+          invoke("theme:set", "dark"),
+          invoke("theme:terminal-set", "tokyo-night"),
+        ]);
+        const saved = JSON.parse(
+          fs.readFileSync(path.join(root, "preferences.json"), "utf8"),
+        );
+        assert.equal(saved.theme, "dark");
+        assert.equal(saved.terminalTheme, "tokyo-night");
+        assert.equal(events.at(-1).terminalTheme, "tokyo-night");
+        for (const invalid of ["invalid", "__proto__", null, {}, 1]) {
+          await assert.rejects(invoke("theme:terminal-set", invalid), /配色/);
+        }
+        assert.equal((await invoke("theme:get")).terminalTheme, "tokyo-night");
+        assert.deepEqual(
+          JSON.parse(
+            fs.readFileSync(path.join(root, "preferences.json"), "utf8"),
+          ),
+          saved,
+        );
+        await invoke("theme:terminal-set", "auto");
+        await invoke("theme:set", "system");
       },
     );
 
@@ -677,6 +707,10 @@ test(
         assert.equal((await invoke("theme:get")).mode, "system");
         await assert.rejects(async () => invoke("profiles:list"), /请稍候/);
         await assert.rejects(async () => invoke("theme:set", "dark"), /请稍候/);
+        await assert.rejects(
+          async () => invoke("theme:terminal-set", "nord"),
+          /请稍候/,
+        );
       },
     );
   },

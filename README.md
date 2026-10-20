@@ -61,7 +61,8 @@ Windows 使用原生标题栏；应用级快捷键采用 Ctrl+Shift+N/T/W、Ctrl
 
 ## 功能
 
-- 浅色、深色与跟随系统三种主题，侧栏底部「外观」切换；终端和系统对话框同步，选择会保存并在下次启动恢复。
+- 浅色、深色与跟随系统三种应用主题，侧栏底部「外观」切换；选择会保存并在下次启动恢复。
+- SSH 终端标题栏「配色」提供跟随应用、Trident 深色／浅色、Dracula、Nord、Tokyo Night、Monokai、Solarized 浅色。独立于应用主题，统一应用于所有 SSH 终端并保存到本机；切换不重连、不清空输出。默认跟随应用。
 - 保存、编辑、删除与搜索连接配置，支持分组标签。
 - 多标签 SSH 终端，支持 UTF-8、ANSI、交互式 shell 和终端尺寸同步。
 - 密码、私钥（包括带口令的私钥）和 SSH Agent 认证。
@@ -94,7 +95,7 @@ FTP 是明文协议；需要加密传输请选择 SFTP 或 FTPS。FTPS 使用显
 
 - `connections.json`：协议、主机、用户名、端口、私钥路径，以及可选的加密凭据。
 - `known-hosts.json`：本应用信任的服务器指纹，与 OpenSSH 的 `known_hosts` 独立。
-- `preferences.json`：外观偏好，默认跟随系统主题。
+- `preferences.json`：应用外观及 SSH 终端配色偏好；默认应用跟随系统、终端跟随应用。
 
 SSH Agent 需要启动应用的环境中存在 `SSH_AUTH_SOCK`，并已执行 `ssh-add`。
 

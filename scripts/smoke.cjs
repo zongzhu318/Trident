@@ -67,6 +67,10 @@ app.on("browser-window-created", (_event, window) => {
       );
       await selectTheme("dark");
       await waitFor(`document.documentElement.dataset.theme === 'dark'`);
+      fs.writeFileSync(
+        path.join(temp, "home-dark.png"),
+        (await window.webContents.capturePage()).toPNG(),
+      );
       await selectTheme("system");
       assert.equal(nativeTheme.themeSource, "system");
       await waitFor(
@@ -265,6 +269,75 @@ app.on("browser-window-created", (_event, window) => {
           `document.querySelector('.xterm-screen').textContent.includes('TERMINAL_READY')`,
         ),
       );
+      // Changing colors must preserve the live terminal, output and app theme.
+      await run(
+        `window.terminalBeforePalette = document.querySelector('.xterm')`,
+      );
+      const selectTerminalTheme = async (id) => {
+        await run(`(() => {
+          const select = document.querySelector('select[aria-label="终端配色"]');
+          Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, '${id}');
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+        await waitFor(
+          `document.querySelector('select[aria-label="终端配色"]').value === '${id}' && !document.querySelector('select[aria-label="终端配色"]').disabled`,
+        );
+      };
+      for (const [id, background] of [
+        ["dark", "rgb(15, 23, 34)"],
+        ["light", "rgb(255, 255, 255)"],
+        ["dracula", "rgb(40, 42, 54)"],
+        ["nord", "rgb(46, 52, 64)"],
+        ["tokyo-night", "rgb(26, 27, 38)"],
+        ["monokai", "rgb(39, 40, 34)"],
+        ["solarized-light", "rgb(253, 246, 227)"],
+      ]) {
+        await selectTerminalTheme(id);
+        await waitFor(
+          `getComputedStyle(document.querySelector('.xterm-viewport')).backgroundColor === '${background}'`,
+        );
+        assert.ok(
+          await run(
+            `document.querySelector('.xterm') === window.terminalBeforePalette && document.querySelector('.xterm-screen').textContent.includes('TERMINAL_READY')`,
+          ),
+        );
+        assert.equal(
+          await run(
+            `getComputedStyle(document.querySelector('.terminal-pane')).backgroundColor`,
+          ),
+          background,
+        );
+        assert.equal(
+          await run(`document.documentElement.dataset.theme`),
+          "light",
+        );
+        assert.equal(
+          JSON.parse(
+            fs.readFileSync(path.join(temp, "preferences.json"), "utf8"),
+          ).terminalTheme,
+          id,
+        );
+        if (id === "dracula")
+          fs.writeFileSync(
+            path.join(temp, "terminal-dracula.png"),
+            (await window.webContents.capturePage()).toPNG(),
+          );
+      }
+      await selectTheme("dark");
+      assert.equal(
+        await run(
+          `getComputedStyle(document.querySelector('.xterm-viewport')).backgroundColor`,
+        ),
+        "rgb(253, 246, 227)",
+      );
+      await selectTerminalTheme("auto");
+      await waitFor(
+        `getComputedStyle(document.querySelector('.xterm-viewport')).backgroundColor === 'rgb(15, 23, 34)'`,
+      );
+      await selectTheme("light");
+      await waitFor(
+        `getComputedStyle(document.querySelector('.xterm-viewport')).backgroundColor === 'rgb(255, 255, 255)'`,
+      );
       fs.writeFileSync(
         path.join(temp, "terminal-light.png"),
         (await window.webContents.capturePage()).toPNG(),
@@ -304,7 +377,7 @@ app.on("browser-window-created", (_event, window) => {
       const savedImage = await window.webContents.capturePage();
       fs.writeFileSync(path.join(temp, "connections.png"), savedImage.toPNG());
       console.log(
-        `UI smoke passed: light/dark/system themes, FTP operations, encrypted credentials/backups, SSH bulk output and background tabs. Screenshots: ${temp}`,
+        `UI smoke passed: app/terminal themes, FTP operations, encrypted credentials/backups, SSH bulk output and background tabs. Screenshots: ${temp}`,
       );
       clearTimeout(timer);
       // Exit directly: destroying the last window first triggers app.quit() on

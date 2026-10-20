@@ -34,14 +34,26 @@ let window;
 const sessions = new Map();
 let savedProfiles = [];
 let knownHosts = {};
+const terminalThemeIds = [
+  "auto",
+  "dark",
+  "light",
+  "dracula",
+  "nord",
+  "tokyo-night",
+  "monokai",
+  "solarized-light",
+];
+let preferences = { theme: "system", terminalTheme: "auto" };
 const themeState = () => ({
   mode: nativeTheme.themeSource,
   effective: nativeTheme.shouldUseDarkColors ? "dark" : "light",
+  terminalTheme: preferences.terminalTheme,
 });
 function publishTheme() {
   if (!window || window.isDestroyed()) return;
   const state = themeState();
-  window.setBackgroundColor(state.effective === "dark" ? "#111318" : "#ffffff");
+  window.setBackgroundColor(state.effective === "dark" ? "#111b28" : "#f8f9fc");
   window.webContents.send("theme:changed", state);
 }
 let persistQueue = Promise.resolve();
@@ -386,8 +398,20 @@ function registerIPC() {
     updateConfiguration(async () => {
       if (!["system", "light", "dark"].includes(mode))
         throw new Error("主题设置无效");
-      await persist("preferences.json", { theme: mode });
+      const next = { ...preferences, theme: mode };
+      await persist("preferences.json", next);
+      preferences = next;
       nativeTheme.themeSource = mode;
+      publishTheme();
+      return themeState();
+    }),
+  );
+  handle("theme:terminal-set", (id) =>
+    updateConfiguration(async () => {
+      if (!terminalThemeIds.includes(id)) throw new Error("终端配色设置无效");
+      const next = { ...preferences, terminalTheme: id };
+      await persist("preferences.json", next);
+      preferences = next;
       publishTheme();
       return themeState();
     }),
@@ -650,7 +674,7 @@ function createWindow() {
     minWidth: 1020,
     minHeight: 680,
     title: "Trident",
-    backgroundColor: nativeTheme.shouldUseDarkColors ? "#111318" : "#ffffff",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#111b28" : "#f8f9fc",
     ...(process.platform === "darwin"
       ? { titleBarStyle: "hiddenInset", trafficLightPosition: { x: 20, y: 21 } }
       : {
@@ -696,12 +720,17 @@ app
   .whenReady()
   .then(async () => {
     await fs.mkdir(app.getPath("userData"), { recursive: true });
-    const preferences = await readJSON("preferences.json", {});
-    nativeTheme.themeSource = ["system", "light", "dark"].includes(
-      preferences.theme,
-    )
-      ? preferences.theme
-      : "system";
+    const savedPreferences = (await readJSON("preferences.json", {})) || {};
+    preferences = {
+      ...savedPreferences,
+      theme: ["system", "light", "dark"].includes(savedPreferences.theme)
+        ? savedPreferences.theme
+        : "system",
+      terminalTheme: terminalThemeIds.includes(savedPreferences.terminalTheme)
+        ? savedPreferences.terminalTheme
+        : "auto",
+    };
+    nativeTheme.themeSource = preferences.theme;
     nativeTheme.on("updated", publishTheme);
     savedProfiles = (await readJSON("connections.json", [])).map((record) => ({
       ...validate.profile(record),

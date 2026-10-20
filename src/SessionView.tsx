@@ -13,7 +13,12 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { Session, Transfer } from "./types";
 import FileBrowser from "./FileBrowser";
-import { useTheme, terminalThemes } from "./theme";
+import { useTheme } from "./theme";
+import {
+  getTerminalTheme,
+  terminalThemeOptions,
+  type TerminalThemeId,
+} from "./terminal-themes";
 import { errorText } from "./errors";
 const api = window.trident;
 
@@ -28,9 +33,11 @@ function TerminalPane({
   ready: boolean;
   onError(error: string): void;
 }) {
-  const { effective } = useTheme();
-  const currentTheme = useRef(effective);
-  currentTheme.current = effective;
+  const { effective, terminalTheme } = useTheme();
+  const colors = getTerminalTheme(terminalTheme, effective);
+  const currentTheme = useRef(colors);
+  currentTheme.current = colors;
+  const [savingTheme, setSavingTheme] = useState(false);
   const host = useRef<HTMLDivElement>(null);
   const terminal = useRef<XTerminal>();
   const addon = useRef<FitAddon>();
@@ -43,7 +50,7 @@ function TerminalPane({
       fontFamily: '"SF Mono", Menlo, Monaco, monospace',
       lineHeight: 1.4,
       scrollback: 5000,
-      theme: terminalThemes[currentTheme.current],
+      theme: currentTheme.current,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -97,9 +104,8 @@ function TerminalPane({
     };
   }, [id, onError]);
   useEffect(() => {
-    if (terminal.current)
-      terminal.current.options.theme = terminalThemes[effective];
-  }, [effective]);
+    if (terminal.current) terminal.current.options.theme = colors;
+  }, [colors]);
   useEffect(() => {
     const update = () => {
       if (terminal.current)
@@ -121,10 +127,36 @@ function TerminalPane({
     return () => cancelAnimationFrame(frame);
   }, [visible, ready, id]);
   return (
-    <div className="terminal-pane">
+    <div className="terminal-pane" style={{ background: colors.background }}>
       <div className="pane-title">
         <Terminal size={14} />
         终端<span>xterm-256color</span>
+        <label className="terminal-theme-control">
+          配色
+          <select
+            aria-label="终端配色"
+            title="应用于所有 SSH 终端，并记住本次选择"
+            value={terminalTheme}
+            disabled={savingTheme}
+            onChange={async (event) => {
+              const id = event.target.value as TerminalThemeId;
+              setSavingTheme(true);
+              try {
+                await api.setTerminalTheme(id);
+              } catch (error) {
+                onError(errorText(error));
+              } finally {
+                setSavingTheme(false);
+              }
+            }}
+          >
+            {terminalThemeOptions.map(({ id, label }) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
       <div className="terminal-host" ref={host} />
     </div>

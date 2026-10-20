@@ -15,6 +15,7 @@ ipcRenderer.on("session:event", (_event, payload) => {
 contextBridge.exposeInMainWorld("trident", {
   getTheme: invoke("theme:get"),
   setTheme: invoke("theme:set"),
+  setTerminalTheme: invoke("theme:terminal-set"),
   onThemeChanged: (callback) => {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on("theme:changed", listener);
