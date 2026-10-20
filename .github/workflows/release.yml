@@ -1,4 +1,4 @@
-name: 发布 macOS / Windows 版本
+name: 发布生产版本
 on:
   workflow_dispatch:
     inputs:
@@ -190,7 +190,7 @@ jobs:
       - name: 运行单元测试
         run: npm test
   build:
-    name: 编译打包
+    name: macOS 编译打包
     needs: [prepare, test]
     runs-on: macos-latest
     timeout-minutes: 45
@@ -488,7 +488,7 @@ jobs:
             release/Trident-app.tar.gz
           retention-days: 7
   build-windows:
-    name: Windows x64 安装包
+    name: Windows 编译打包
     needs: [prepare, test]
     runs-on: windows-2022
     timeout-minutes: 30
@@ -536,11 +536,14 @@ jobs:
       - name: 验证安装、实际应用启动和卸载
         timeout-minutes: 5
         run: ./scripts/test-windows-installer.ps1
-      - name: 上传 Windows 安装包
+      - name: 上传 Windows 安装包与更新元数据
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-release
-          path: release/Trident-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
+          path: |
+            release/Trident-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
+            release/Trident-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe.blockmap
+            release/latest.yml
           if-no-files-found: error
           retention-days: 7
   publish:
@@ -784,9 +787,32 @@ jobs:
           fi
           SIGNATURE="$(jq -r '.signature' "${ARCHIVES}/metadata.json")"
           printf '%s\n' "$SPARKLE_PRIVATE_KEY" | vendor/sparkle/bin/sign_update --ed-key-file - --verify "${ARCHIVES}/${DMG_NAME}" "$SIGNATURE"
+          # latest.yml 与 blockmap 必须随安装包一同就位，内容与实际 exe 严格一致
+          LATEST_YML="release/latest.yml"
+          BLOCKMAP_NAME="${EXE_NAME}.blockmap"
+          if [ ! -f "$LATEST_YML" ] || [ ! -f "release/${BLOCKMAP_NAME}" ]; then
+            echo "Windows 更新元数据缺失：${LATEST_YML} 与 release/${BLOCKMAP_NAME} 必须同时存在" >&2
+            exit 1
+          fi
+          LATEST_VERSION="$(sed -n 's/^version: *//p' "$LATEST_YML" | head -n 1 | tr -d "'\"")"
+          LATEST_PATH="$(sed -n 's/^path: *//p' "$LATEST_YML" | head -n 1 | tr -d "'\"")"
+          LATEST_SHA512="$(sed -n 's/^sha512: *//p' "$LATEST_YML" | head -n 1 | tr -d "'\"")"
+          if [ "$LATEST_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "latest.yml 版本与发布版本不一致：${LATEST_VERSION} != ${RELEASE_VERSION}" >&2
+            exit 1
+          fi
+          if [ "$LATEST_PATH" != "$EXE_NAME" ]; then
+            echo "latest.yml 指向的文件名与实际安装包不一致：${LATEST_PATH} != ${EXE_NAME}" >&2
+            exit 1
+          fi
+          ACTUAL_SHA512="$(shasum -a 512 "release/${EXE_NAME}" | awk '{print $1}' | xxd -r -p | base64 | tr -d '\n')"
+          if [ "$ACTUAL_SHA512" != "$LATEST_SHA512" ]; then
+            echo "latest.yml 的 sha512 与实际安装包内容不一致" >&2
+            exit 1
+          fi
           {
             shasum -a 256 "${ARCHIVES}/${DMG_NAME}" "${ARCHIVES}/appcast-arm64.xml" | sed "s#${ARCHIVES}/##"
-            shasum -a 256 "release/${EXE_NAME}" | sed "s#release/##"
+            shasum -a 256 "release/${EXE_NAME}" "release/${BLOCKMAP_NAME}" "release/latest.yml" | sed "s#release/##"
           } > "${ARCHIVES}/SHA256SUMS"
       - name: 发布正式 Release
         run: |
@@ -796,6 +822,8 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             ".release-work/archives/${DMG_NAME}" \
             "release/${EXE_NAME}" \
+            "release/${EXE_NAME}.blockmap" \
+            "release/latest.yml" \
             ".release-work/archives/appcast-arm64.xml" \
             ".release-work/archives/SHA256SUMS"
           gh release edit "$RELEASE_TAG" --draft=false --latest
@@ -807,6 +835,10 @@ jobs:
             "https://github.com/zongzhu318/Trident/releases/download/${RELEASE_TAG}/${DMG_NAME}" > /dev/null
           curl --fail --location --head --retry 5 --retry-all-errors \
             "https://github.com/zongzhu318/Trident/releases/download/${RELEASE_TAG}/${EXE_NAME}" > /dev/null
+          curl --fail --location --head --retry 5 --retry-all-errors \
+            "https://github.com/zongzhu318/Trident/releases/download/${RELEASE_TAG}/${EXE_NAME}.blockmap" > /dev/null
+          curl --fail --location --head --retry 5 --retry-all-errors \
+            "https://github.com/zongzhu318/Trident/releases/download/${RELEASE_TAG}/latest.yml" > /dev/null
           PAGES=".release-work/pages"
           mkdir -p "${PAGES}/stable"
           cp .release-work/archives/appcast-arm64.xml "${PAGES}/stable/appcast-arm64.xml"

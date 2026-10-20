@@ -6,15 +6,49 @@ function createUpdater({
   prepareQuit,
   cancelQuit,
   isBusy,
-  openExternal,
   load = require,
   resumeGraceMs = 10000,
 }) {
   let bridge;
+  let win;
   let unavailable =
     "此构建未配置 Sparkle 更新，请安装 GitHub Releases 中的正式更新版。";
   const showError = (error) =>
     dialog.showErrorBox("Trident 更新", String(error.message || error));
+  const busyError = () => new Error("存在活跃连接，请先断开所有连接后再更新。");
+  const releaseText = (info) => {
+    const notes = info?.releaseNotes;
+    if (typeof notes === "string") return notes;
+    if (Array.isArray(notes))
+      return notes
+        .map((item) => item?.note ?? "")
+        .join("\n")
+        .trim();
+    return "";
+  };
+  async function promptInstall() {
+    // 下载完成时若仍处于忙碌状态，等待 refreshBusy 在空闲后再次触发
+    if (!win?.downloaded || win.prompting || isBusy()) return;
+    win.prompting = true;
+    try {
+      const info = win.info;
+      const { response } = await dialog.showMessageBox({
+        type: "info",
+        message: `Trident ${info?.version || "新版本"} 已下载完成，是否立即重启安装？`,
+        detail: releaseText(info) || undefined,
+        buttons: ["立即重启安装", "稍后"],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      if (response !== 0) return;
+      if (isBusy()) throw busyError();
+      win.autoUpdater.quitAndInstall(true, true);
+    } catch (error) {
+      showError(error);
+    } finally {
+      win.prompting = false;
+    }
+  }
   async function resume() {
     try {
       if (bridge?.state().pendingInstall && (await prepareQuit())) {
@@ -51,6 +85,33 @@ function createUpdater({
       console.error(unavailable);
     }
   }
+  if (process.platform === "win32") {
+    if (app.isPackaged) {
+      try {
+        const { autoUpdater } = load("electron-updater");
+        win = { autoUpdater, downloaded: false, info: null, prompting: false };
+        autoUpdater.autoDownload = true;
+        autoUpdater.on("update-downloaded", (info) => {
+          win.downloaded = true;
+          win.info = info;
+          void promptInstall();
+        });
+        autoUpdater.on("update-not-available", () => {
+          void dialog.showMessageBox({
+            type: "info",
+            message: "已是最新版本。",
+          });
+        });
+        autoUpdater.on("error", showError);
+      } catch (error) {
+        win = undefined;
+        unavailable = `更新组件未能加载：${error.message}`;
+        console.error(unavailable);
+      }
+    } else {
+      unavailable = "更新仅对打包版生效，请从 GitHub Releases 下载安装包。";
+    }
+  }
   return {
     assertCanConnect() {
       if (bridge?.state().inProgress)
@@ -58,20 +119,18 @@ function createUpdater({
     },
     refreshBusy() {
       bridge?.setBusy(isBusy());
+      if (win?.downloaded) void promptInstall();
     },
     menu() {
       if (process.platform === "win32")
         return [
           {
-            label: "下载新版本…",
+            label: "检查更新…",
             click() {
-              Promise.resolve()
-                .then(() =>
-                  openExternal(
-                    "https://github.com/zongzhu318/Trident/releases/latest",
-                  ),
-                )
-                .catch(showError);
+              if (!win) return showError(new Error(unavailable));
+              if (isBusy()) return showError(busyError());
+              if (win.downloaded) return void promptInstall();
+              win.autoUpdater.checkForUpdates().catch(showError);
             },
           },
         ];

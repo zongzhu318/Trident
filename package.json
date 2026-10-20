@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "basic-ftp": "^6.2.3",
+    "electron-updater": "^6.8.9",
     "ssh2": "^1.16.0"
   },
   "devDependencies": {
@@ -42,6 +43,11 @@
     "productName": "Trident",
     "directories": {
       "output": "release"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "zongzhu318",
+      "repo": "Trident"
     },
     "files": [
       "dist/**/*",

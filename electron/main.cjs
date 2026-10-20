@@ -741,7 +741,6 @@ app
     updater = createUpdater({
       app,
       dialog,
-      openExternal: (url) => shell.openExternal(url),
       prepareQuit: quitter.prepare,
       cancelQuit: quitter.cancelPreparation,
       isBusy: () => sessions.size > 0,
