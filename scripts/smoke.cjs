@@ -174,11 +174,15 @@ app.on("browser-window-created", (_event, window) => {
       await waitFor(
         `document.querySelectorAll('.connection-card').length === 2 && !document.querySelector('.modal')`,
       );
+      await run(`document.querySelector('.connection-nav .nav-edit').click()`);
+      await waitFor(`!!document.querySelector('.modal')`);
+      await run(
+        `Array.from(document.querySelectorAll('.modal button')).find(b => b.innerText === '取消').click()`,
+      );
+      await waitFor(`!document.querySelector('.modal')`);
       await run(
         `document.querySelector('.connection-card .card-footer button').click()`,
       );
-      await waitFor(`!!document.querySelector('.modal')`);
-      await run(`document.querySelector('.modal form').requestSubmit()`);
       await waitFor(
         `document.body.innerText.includes('FTP 已连接') && !!document.querySelector('.files-only .file-pane')`,
       );
