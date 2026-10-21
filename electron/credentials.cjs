@@ -9,6 +9,7 @@ const validate = require("./validation.cjs");
 const derive = promisify(scrypt);
 const MAX_BACKUP = 8 * 1024 * 1024;
 const AAD = Buffer.from("trident-backup:v1:scrypt-v1");
+const LOCAL_FORMAT = "trident-local:v1";
 
 function credentials(value = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -49,45 +50,38 @@ function relevant(profile, input) {
         : { passphrase: value.passphrase }
       : {};
 }
-function makeVault(safeStorage) {
-  function available() {
-    if (!safeStorage?.isEncryptionAvailable())
-      throw new Error(
-        "系统加密存储不可用，无法保存或读取凭据；可取消保存并手动输入",
-      );
+function parseLocalSecret(record, requested) {
+  if (!record?.secret || binding(record) !== binding(requested)) return {};
+  try {
+    const value = JSON.parse(record.secret);
+    if (value?.format !== LOCAL_FORMAT || value.binding !== binding(requested))
+      return {};
+    return relevant(requested, value.credentials);
+  } catch {
+    return {};
   }
+}
+function makeVault() {
   return {
     seal(profile, input) {
       const value = relevant(profile, input);
       if (!Object.keys(value).length) return undefined;
-      available();
-      return safeStorage
-        .encryptString(
-          JSON.stringify({ binding: binding(profile), credentials: value }),
-        )
-        .toString("base64");
+      return JSON.stringify({
+        format: LOCAL_FORMAT,
+        binding: binding(profile),
+        credentials: value,
+      });
     },
     open(record, requested = record) {
-      if (!record?.secret || binding(record) !== binding(requested)) return {};
-      available();
-      try {
-        const value = JSON.parse(
-          safeStorage.decryptString(Buffer.from(record.secret, "base64")),
-        );
-        if (value.binding !== binding(requested)) return {};
-        return relevant(requested, value.credentials);
-      } catch {
-        throw new Error(
-          "已保存凭据无法解密，请重新输入并保存；迁移到其他 Mac 请使用加密导入导出",
-        );
-      }
+      return parseLocalSecret(record, requested);
     },
   };
 }
 function publicProfile(record) {
   return {
     ...validate.profile(record),
-    hasSavedCredentials: Boolean(record.secret),
+    hasSavedCredentials:
+      Object.keys(parseLocalSecret(record, record)).length > 0,
   };
 }
 function validateEntries(entries, allowCredentials) {

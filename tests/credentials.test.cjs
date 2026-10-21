@@ -6,7 +6,6 @@ const {
   encodeBackup,
   decodeBackup,
 } = require("../electron/credentials.cjs");
-const testStorage = require("./helpers/crypto-storage.cjs");
 const profile = {
   id: "one",
   name: "测试",
@@ -18,13 +17,16 @@ const profile = {
   keyPath: "",
   group: "",
 };
-test("local credential vault binds secrets to endpoint and hides them from profile views", () => {
-  const vault = makeVault(testStorage());
+test("local credential vault stores plaintext bound to the endpoint and hides it from profile views", () => {
+  const vault = makeVault();
   const record = {
     ...profile,
     secret: vault.seal(profile, { password: "very secret 密码" }),
   };
-  assert.equal(JSON.stringify(record).includes("very secret"), false);
+  assert.equal(
+    JSON.parse(record.secret).credentials.password,
+    "very secret 密码",
+  );
   assert.deepEqual(vault.open(record), { password: "very secret 密码" });
   assert.deepEqual(
     vault.open(record, { ...profile, host: "other.example.com" }),
@@ -34,12 +36,17 @@ test("local credential vault binds secrets to endpoint and hides them from profi
   assert.deepEqual(vault.open(record, { ...profile, protocol: "ftp" }), {});
   assert.equal(publicProfile(record).secret, undefined);
   assert.equal(publicProfile(record).hasSavedCredentials, true);
-  const otherMachine = makeVault(testStorage());
-  assert.throws(() => otherMachine.open(record), /无法解密/);
+  assert.deepEqual(makeVault().open(record), { password: "very secret 密码" });
+  const legacy = {
+    ...profile,
+    secret: Buffer.from("legacy-ciphertext").toString("base64"),
+  };
+  assert.deepEqual(vault.open(legacy), {});
+  assert.equal(publicProfile(legacy).hasSavedCredentials, false);
 });
-test("private key passphrases persist and unavailable encryption never falls back to plaintext", () => {
+test("private key passphrases persist locally and are only returned for key auth", () => {
   const keyProfile = { ...profile, auth: "key", keyPath: "/tmp/id_ed25519" };
-  const vault = makeVault(testStorage());
+  const vault = makeVault();
   const record = {
     ...keyProfile,
     secret: vault.seal(keyProfile, {
@@ -48,13 +55,13 @@ test("private key passphrases persist and unavailable encryption never falls bac
     }),
   };
   assert.deepEqual(vault.open(record), { passphrase: "私钥口令" });
-  assert.throws(
-    () =>
-      makeVault({ isEncryptionAvailable: () => false }).seal(profile, {
-        password: "secret",
-      }),
-    /不可用/,
+  assert.deepEqual(vault.open(record, { ...keyProfile, auth: "password" }), {});
+  assert.deepEqual(
+    vault.open(record, { ...keyProfile, keyPath: "/tmp/other" }),
+    {},
   );
+  assert.equal(publicProfile(record).hasSavedCredentials, true);
+  assert.equal(vault.seal(profile, {}), undefined);
 });
 test("encrypted portable backups round trip passwords and passphrases, and reject tampering", async () => {
   const entries = [

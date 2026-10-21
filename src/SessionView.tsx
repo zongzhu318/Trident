@@ -1,17 +1,20 @@
-import { appModifier } from "./platform";
+import { appModifier, shortcutPrefix } from "./platform";
 import { memo, useEffect, useRef, useState } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
+  CaseSensitive,
   Globe,
   LoaderCircle,
-  LockKeyhole,
   PanelRightClose,
   PanelRightOpen,
+  Search,
   ShieldCheck,
-  Terminal,
   X,
 } from "lucide-react";
 import { Terminal as XTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import type { Session, Transfer } from "./types";
 import FileBrowser from "./FileBrowser";
@@ -23,26 +26,43 @@ import {
 } from "./terminal-themes";
 import { errorText } from "./errors";
 const api = window.trident;
+const findDecorations = {
+  matchBackground: "#f2c14e55",
+  matchBorder: "#f2c14e88",
+  matchOverviewRuler: "#f2c14e",
+  activeMatchBackground: "#f0a020aa",
+  activeMatchBorder: "#f0a020",
+  activeMatchColorOverviewRuler: "#f0a020",
+};
 
 function TerminalPane({
   id,
   visible,
   ready,
+  findOpen,
+  onFindClose,
   onError,
 }: {
   id: string;
   visible: boolean;
   ready: boolean;
+  findOpen: boolean;
+  onFindClose(): void;
   onError(error: string): void;
 }) {
   const { effective, terminalTheme } = useTheme();
   const colors = getTerminalTheme(terminalTheme, effective);
   const currentTheme = useRef(colors);
   currentTheme.current = colors;
-  const [savingTheme, setSavingTheme] = useState(false);
   const host = useRef<HTMLDivElement>(null);
   const terminal = useRef<XTerminal>();
   const addon = useRef<FitAddon>();
+  const search = useRef<SearchAddon>();
+  const findInput = useRef<HTMLInputElement>(null);
+  const findWasOpen = useRef(false);
+  const [findText, setFindText] = useState("");
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [findResult, setFindResult] = useState({ index: -1, count: 0 });
   const readyRef = useRef(ready);
   readyRef.current = ready;
   useEffect(() => {
@@ -53,14 +73,24 @@ function TerminalPane({
       lineHeight: 1.4,
       scrollback: 5000,
       theme: currentTheme.current,
+      // SearchAddon highlights every match through the decoration API.
+      allowProposedApi: true,
     });
     const fit = new FitAddon();
+    const find = new SearchAddon();
     term.loadAddon(fit);
+    term.loadAddon(find);
     term.open(host.current!);
     terminal.current = term;
     addon.current = fit;
+    search.current = find;
+    const findResults = find.onDidChangeResults(
+      ({ resultIndex, resultCount }) =>
+        setFindResult({ index: resultIndex, count: resultCount }),
+    );
     term.attachCustomKeyEventHandler(
-      (e) => !(appModifier(e) && ["c", "v", "a"].includes(e.key.toLowerCase())),
+      (e) =>
+        !(appModifier(e) && ["c", "v", "a", "f"].includes(e.key.toLowerCase())),
     );
     let fitFrame = 0;
     let lastSize = "";
@@ -97,12 +127,14 @@ function TerminalPane({
     );
     return () => {
       unsub();
+      findResults.dispose();
       input.dispose();
       observer.disconnect();
       cancelAnimationFrame(fitFrame);
       term.dispose();
       terminal.current = undefined;
       addon.current = undefined;
+      search.current = undefined;
     };
   }, [id, onError]);
   useEffect(() => {
@@ -128,38 +160,143 @@ function TerminalPane({
     });
     return () => cancelAnimationFrame(frame);
   }, [visible, ready, id]);
+  function findNext() {
+    if (!findText) return;
+    search.current?.findNext(findText, {
+      caseSensitive,
+      decorations: findDecorations,
+    });
+  }
+  function findPrevious() {
+    if (!findText) return;
+    search.current?.findPrevious(findText, {
+      caseSensitive,
+      decorations: findDecorations,
+    });
+  }
+  function changeFindText(value: string) {
+    setFindText(value);
+    const find = search.current;
+    if (!find) return;
+    if (!value) {
+      find.clearDecorations();
+      terminal.current?.clearSelection();
+      setFindResult({ index: -1, count: 0 });
+      return;
+    }
+    find.findNext(value, {
+      caseSensitive,
+      incremental: true,
+      decorations: findDecorations,
+    });
+  }
+  function toggleCaseSensitive() {
+    const next = !caseSensitive;
+    setCaseSensitive(next);
+    if (!findText) return;
+    terminal.current?.clearSelection();
+    search.current?.findNext(findText, {
+      caseSensitive: next,
+      decorations: findDecorations,
+    });
+  }
+  useEffect(() => {
+    const find = search.current;
+    if (findOpen) {
+      findWasOpen.current = true;
+      findInput.current?.focus();
+      findInput.current?.select();
+      if (findText)
+        find?.findNext(findText, {
+          caseSensitive,
+          decorations: findDecorations,
+        });
+      return;
+    }
+    if (!findWasOpen.current) return;
+    findWasOpen.current = false;
+    find?.clearDecorations();
+    terminal.current?.clearSelection();
+    setFindResult({ index: -1, count: 0 });
+    if (visible) terminal.current?.focus();
+  }, [findOpen]);
+  const findCount = !findText
+    ? ""
+    : findResult.count
+      ? `${findResult.index < 0 ? "…" : findResult.index + 1} / ${findResult.count}`
+      : "无结果";
   return (
     <div className="terminal-pane" style={{ background: colors.background }}>
-      <div className="pane-title">
-        <Terminal size={14} />
-        终端<span>xterm-256color</span>
-        <label className="terminal-theme-control">
-          配色
-          <select
-            aria-label="终端配色"
-            title="应用于所有 SSH 终端，并记住本次选择"
-            value={terminalTheme}
-            disabled={savingTheme}
-            onChange={async (event) => {
-              const id = event.target.value as TerminalThemeId;
-              setSavingTheme(true);
-              try {
-                await api.setTerminalTheme(id);
-              } catch (error) {
-                onError(errorText(error));
-              } finally {
-                setSavingTheme(false);
+      {findOpen && (
+        <div
+          className="terminal-search"
+          role="search"
+          aria-label="查找终端输出"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              onFindClose();
+            }
+          }}
+        >
+          <Search size={14} className="terminal-search-icon" />
+          <input
+            ref={findInput}
+            value={findText}
+            aria-label="查找终端输出"
+            placeholder="查找终端输出"
+            spellCheck={false}
+            autoComplete="off"
+            onChange={(event) => changeFindText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing) return;
+              if (event.key === "Enter" || event.key === "F3") {
+                event.preventDefault();
+                if (event.shiftKey) findPrevious();
+                else findNext();
               }
             }}
+          />
+          <span className="terminal-search-count" aria-live="polite">
+            {findCount}
+          </span>
+          <button
+            className={`icon-button terminal-search-case${caseSensitive ? " active" : ""}`}
+            aria-label="区分大小写"
+            aria-pressed={caseSensitive}
+            title="区分大小写"
+            onClick={toggleCaseSensitive}
           >
-            {terminalThemeOptions.map(({ id, label }) => (
-              <option key={id} value={id}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+            <CaseSensitive size={15} />
+          </button>
+          <button
+            className="icon-button"
+            aria-label="上一个匹配"
+            title="上一个匹配（Shift+Enter / Shift+F3）"
+            disabled={!findText}
+            onClick={findPrevious}
+          >
+            <ArrowUp size={15} />
+          </button>
+          <button
+            className="icon-button"
+            aria-label="下一个匹配"
+            title="下一个匹配（Enter / F3）"
+            disabled={!findText}
+            onClick={findNext}
+          >
+            <ArrowDown size={15} />
+          </button>
+          <button
+            className="icon-button"
+            aria-label="关闭查找"
+            title="关闭查找（Esc）"
+            onClick={onFindClose}
+          >
+            <X size={15} />
+          </button>
+        </div>
+      )}
       <div className="terminal-host" ref={host} />
     </div>
   );
@@ -168,25 +305,64 @@ function TerminalPane({
 const SessionView = memo(function SessionView({
   session,
   visible,
+  filePaneWidth,
+  onFilePaneWidthChange,
 }: {
   session: Session;
   visible: boolean;
+  filePaneWidth: number | null;
+  onFilePaneWidthChange: (width: number | null) => void;
 }) {
   const [status, setStatus] = useState<"connecting" | "ready" | "closed">(
     "connecting",
   );
   const [filesReady, setFilesReady] = useState(false);
   const [filesVisible, setFilesVisible] = useState(true);
+  const [findOpen, setFindOpen] = useState(false);
+  const [savingTheme, setSavingTheme] = useState(false);
   const filesToggle = useRef<HTMLButtonElement>(null);
   const [error, setError] = useState("");
   const [transfer, setTransfer] = useState<Transfer | null>(null);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const pendingTransfer = useRef<Transfer | null>(null);
+  const { terminalTheme } = useTheme();
   useEffect(() => {
     if (visible) setTransfer(pendingTransfer.current);
   }, [visible]);
   const hasTerminal = session.profile.protocol === "ssh";
+  useEffect(() => {
+    if (!hasTerminal) return;
+    const listener = (event: KeyboardEvent) => {
+      if (!visibleRef.current) return;
+      if (appModifier(event) && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        setFindOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, [hasTerminal]);
+  const authLabel =
+    session.profile.auth === "password"
+      ? "PASSWORD"
+      : session.profile.auth === "key"
+        ? "PRIVATE KEY"
+        : "SSH AGENT";
+  const connectionHint =
+    status === "connecting"
+      ? "等待服务器响应或身份确认"
+      : status !== "ready"
+        ? "会话已结束，可从连接管理重新连接"
+        : session.profile.protocol === "ftp"
+          ? "FTP 明文连接"
+          : "加密连接";
+  const statusText =
+    status === "connecting"
+      ? "正在连接…"
+      : status === "ready"
+        ? `${session.profile.protocol.toUpperCase()} 已连接`
+        : "已断开";
   useEffect(() => {
     let disposed = false;
     const unsub = api.onSessionEvent(session.id, (event) => {
@@ -238,19 +414,22 @@ const SessionView = memo(function SessionView({
       data-session-id={session.id}
       style={{ display: visible ? "flex" : "none" }}
     >
-      <div className="session-heading">
-        <div>
+      <div className="session-toolbar">
+        <div className="session-identity">
           <span
             className={`status-dot ${status !== "ready" ? "inactive" : ""}`}
           />
           <strong>{session.profile.name}</strong>
-          <span className="muted">
+          <span className="session-address">
             {session.profile.username}@{session.profile.host}:
             {session.profile.port}
           </span>
         </div>
         <div className="session-actions">
-          <span className="session-status">
+          <span
+            className="session-status"
+            title={`${connectionHint} · ${session.profile.protocol.toUpperCase()}${hasTerminal ? ` · ${authLabel}` : ""}`}
+          >
             {status === "connecting" ? (
               <LoaderCircle className="spin" size={13} />
             ) : session.profile.protocol === "ftp" ? (
@@ -258,12 +437,50 @@ const SessionView = memo(function SessionView({
             ) : (
               <ShieldCheck size={13} />
             )}
-            {status === "connecting"
-              ? "正在连接…"
-              : status === "ready"
-                ? `${session.profile.protocol.toUpperCase()} 已连接`
-                : "已断开"}
+            {statusText}
           </span>
+          {hasTerminal && (
+            <button
+              className="secondary small terminal-find-toggle"
+              aria-label="查找终端输出"
+              aria-pressed={findOpen}
+              title={`查找终端输出（${shortcutPrefix}F）`}
+              onClick={() => setFindOpen((open) => !open)}
+            >
+              <Search size={14} />
+              查找
+            </button>
+          )}
+          {hasTerminal && (
+            <label
+              className="terminal-theme-control"
+              title="应用于所有 SSH 终端，并记住本次选择"
+            >
+              配色
+              <select
+                aria-label="终端配色"
+                value={terminalTheme}
+                disabled={savingTheme}
+                onChange={async (event) => {
+                  const theme = event.target.value as TerminalThemeId;
+                  setSavingTheme(true);
+                  try {
+                    await api.setTerminalTheme(theme);
+                  } catch (error) {
+                    setError(errorText(error));
+                  } finally {
+                    setSavingTheme(false);
+                  }
+                }}
+              >
+                {terminalThemeOptions.map(({ id, label }) => (
+                  <option key={id} value={id}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {hasTerminal && (
             <button
               ref={filesToggle}
@@ -298,6 +515,8 @@ const SessionView = memo(function SessionView({
             id={session.id}
             ready={status === "ready"}
             visible={visible}
+            findOpen={findOpen}
+            onFindClose={() => setFindOpen(false)}
             onError={setError}
           />
         )}
@@ -307,6 +526,8 @@ const SessionView = memo(function SessionView({
           enabled={filesReady && status === "ready"}
           transfer={transfer}
           collapsed={hasTerminal && !filesVisible}
+          width={hasTerminal ? filePaneWidth : null}
+          onWidthChange={hasTerminal ? onFilePaneWidthChange : undefined}
           onHide={
             hasTerminal
               ? () => {
@@ -316,30 +537,6 @@ const SessionView = memo(function SessionView({
               : undefined
           }
         />
-      </div>
-      <div className="session-footer">
-        <span>
-          {session.profile.protocol === "ftp" ? (
-            <Globe size={12} />
-          ) : (
-            <LockKeyhole size={12} />
-          )}
-          {status === "ready"
-            ? session.profile.protocol === "ftp"
-              ? "FTP 明文连接"
-              : "加密连接"
-            : status === "connecting"
-              ? "等待服务器响应或身份确认"
-              : "会话已结束，可从连接管理重新连接"}
-        </span>
-        <span>
-          {session.profile.protocol.toUpperCase()} ·{" "}
-          {session.profile.auth === "password"
-            ? "PASSWORD"
-            : session.profile.auth === "key"
-              ? "PRIVATE KEY"
-              : "SSH AGENT"}
-        </span>
       </div>
     </section>
   );

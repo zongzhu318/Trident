@@ -74,7 +74,7 @@ child.stderr.on("data", async (data) => {
     }
     assert.ok(ready, "Main module must load");
     const response = await evaluate(`(async () => {
-      const {app, BrowserWindow, Menu, safeStorage} = process.mainModule.require('electron');
+      const {app, BrowserWindow, Menu} = process.mainModule.require('electron');
       await app.whenReady();
       let window;
       for (let i = 0; i < 200; i++) {
@@ -83,8 +83,7 @@ child.stderr.on("data", async (data) => {
         await new Promise(resolve => setTimeout(resolve, 50));
       }
       const view = await window.webContents.executeJavaScript('(async () => ({ home: !!document.querySelector(".home"), profiles: await window.trident.profiles(), platform: document.documentElement.dataset.platform, logo: document.querySelector(".brand-mark")?.naturalWidth, node: typeof window.require }))()');
-      const encrypted = safeStorage.encryptString('installer-test');
-      return { packaged: app.isPackaged, version: app.getVersion(), view, vault: safeStorage.decryptString(encrypted) === 'installer-test', menus: Menu.getApplicationMenu().items[0].submenu.items.map(item => item.label) };
+      return { packaged: app.isPackaged, version: app.getVersion(), view, menus: Menu.getApplicationMenu().items[0].submenu.items.map(item => item.label) };
     })()`);
     if (response.exceptionDetails)
       throw new Error(JSON.stringify(response.exceptionDetails));
@@ -96,7 +95,6 @@ child.stderr.on("data", async (data) => {
     assert.ok(result.view.logo > 0);
     assert.equal(result.view.node, "undefined");
     assert.deepEqual(result.view.profiles, []);
-    assert.equal(result.vault, true);
     assert.ok(result.menus.includes("检查更新…"));
     assert.ok(!result.menus.includes("下载新版本…"));
     assert.ok(!result.menus.includes("自动检查更新"));
@@ -120,6 +118,6 @@ child.on("exit", (code) => {
     process.exitCode = 1;
   } else
     console.log(
-      "Installed Windows application passed: startup, version, UI, isolated IPC, DPAPI and quit",
+      "Installed Windows application passed: startup, version, UI, isolated IPC and quit",
     );
 });

@@ -21,6 +21,11 @@ contextBridge.exposeInMainWorld("trident", {
     ipcRenderer.on("theme:changed", listener);
     return () => ipcRenderer.removeListener("theme:changed", listener);
   },
+  onToggleFocus: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on("ui:toggle-focus", listener);
+    return () => ipcRenderer.removeListener("ui:toggle-focus", listener);
+  },
   acknowledge: (id, bytes) => ipcRenderer.send("ssh:ack", id, bytes),
   onSessionEvent: (id, callback, includeData = false) => {
     if (!sessionListeners.has(id)) sessionListeners.set(id, new Map());

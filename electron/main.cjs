@@ -4,10 +4,11 @@ const {
   ipcMain,
   dialog,
   Menu,
-  safeStorage,
   nativeTheme,
   shell,
 } = require("electron");
+// 开发模式直接运行 Electron.app，app.name 默认取 package.json 的 name，统一为产品名以对齐打包版
+app.setName("Trident");
 const { Client } = require("ssh2");
 const { Client: FTPClient } = require("basic-ftp");
 const fs = require("node:fs/promises");
@@ -26,7 +27,7 @@ const {
   decodeBackup,
   MAX_BACKUP,
 } = require("./credentials.cjs");
-const vault = makeVault(safeStorage);
+const vault = makeVault();
 const pendingImports = new Map();
 const profileViews = () => savedProfiles.map(publicProfile);
 
@@ -719,7 +720,7 @@ function createWindow() {
 app
   .whenReady()
   .then(async () => {
-    await fs.mkdir(app.getPath("userData"), { recursive: true });
+    await fs.mkdir(app.getPath("userData"), { recursive: true, mode: 0o700 });
     const savedPreferences = (await readJSON("preferences.json", {})) || {};
     preferences = {
       ...savedPreferences,
@@ -745,13 +746,17 @@ app
       cancelQuit: quitter.cancelPreparation,
       isBusy: () => sessions.size > 0,
     });
+    app.setAboutPanelOptions({
+      applicationName: "Trident",
+      applicationVersion: app.getVersion(),
+    });
     Menu.setApplicationMenu(
       Menu.buildFromTemplate([
         {
           label: "Trident",
           submenu: [
             process.platform === "darwin"
-              ? { role: "about" }
+              ? { role: "about", label: "关于 Trident" }
               : {
                   label: "关于 Trident",
                   click: () => {
@@ -768,37 +773,40 @@ app
             { type: "separator" },
             ...(process.platform === "darwin"
               ? [
-                  { role: "services" },
+                  { role: "services", label: "服务" },
                   { type: "separator" },
-                  { role: "hide" },
-                  { role: "hideOthers" },
+                  { role: "hide", label: "隐藏 Trident" },
+                  { role: "hideOthers", label: "隐藏其他" },
                   { type: "separator" },
                 ]
               : []),
-            { role: "quit" },
+            { role: "quit", label: "退出 Trident" },
           ],
         },
         {
           label: "编辑",
           submenu: [
-            { role: "undo" },
-            { role: "redo" },
+            { role: "undo", label: "撤销" },
+            { role: "redo", label: "重做" },
             { type: "separator" },
-            { role: "cut" },
+            { role: "cut", label: "剪切" },
             {
               role: "copy",
+              label: "复制",
               ...(process.platform === "win32"
                 ? { accelerator: "Ctrl+Shift+C" }
                 : {}),
             },
             {
               role: "paste",
+              label: "粘贴",
               ...(process.platform === "win32"
                 ? { accelerator: "Ctrl+Shift+V" }
                 : {}),
             },
             {
               role: "selectAll",
+              label: "全选",
               ...(process.platform === "win32"
                 ? { accelerator: "Ctrl+Shift+A" }
                 : {}),
@@ -808,16 +816,42 @@ app
         {
           label: "显示",
           submenu: [
-            { role: "resetZoom" },
-            { role: "zoomIn" },
-            { role: "zoomOut" },
-            { role: "togglefullscreen" },
-            ...(dev ? [{ role: "toggleDevTools" }] : []),
+            {
+              label: "专注模式",
+              accelerator:
+                process.platform === "darwin" ? "Command+M" : "Control+Shift+M",
+              click: (_item, target) => {
+                const win = target ?? BrowserWindow.getFocusedWindow();
+                win?.webContents.send("ui:toggle-focus");
+              },
+            },
+            { type: "separator" },
+            { role: "resetZoom", label: "实际大小" },
+            { role: "zoomIn", label: "放大" },
+            { role: "zoomOut", label: "缩小" },
+            { role: "togglefullscreen", label: "切换全屏" },
+            ...(dev
+              ? [{ role: "toggleDevTools", label: "切换开发者工具" }]
+              : []),
           ],
         },
         {
           label: "窗口",
-          submenu: [{ role: "minimize" }, { role: "zoom" }, { role: "front" }],
+          submenu: [
+            // minimize role 会强制保留 macOS 的 Cmd+M，改用普通菜单项让位给专注模式
+            process.platform === "darwin"
+              ? {
+                  label: "最小化",
+                  accelerator: "Command+Alt+M",
+                  click: (_item, target) => {
+                    const win = target ?? BrowserWindow.getFocusedWindow();
+                    win?.minimize();
+                  },
+                }
+              : { role: "minimize", label: "最小化" },
+            { role: "zoom", label: "缩放" },
+            { role: "front", label: "前置全部窗口" },
+          ],
         },
       ]),
     );

@@ -1,5 +1,5 @@
 // Run with Electron after building. Uses temporary app data and captures the UI.
-const { app, dialog, nativeTheme } = require("electron");
+const { app, dialog, Menu, nativeTheme } = require("electron");
 const startFTP = require("../tests/helpers/ftp-server.cjs");
 const startTerminal = require("../tests/helpers/terminal-server.cjs");
 const fs = require("node:fs");
@@ -12,7 +12,7 @@ let saveDestination = path.join(temp, "backup.json");
 let openFiles = [saveDestination];
 let ftpServer;
 let sshServer;
-// Exercise the app's real IPC and encryption, with deterministic native file choices.
+// Exercise the app's real IPC and local credential storage, with deterministic native file choices.
 dialog.showSaveDialog = async () => ({
   canceled: false,
   filePath: saveDestination,
@@ -133,7 +133,7 @@ app.on("browser-window-created", (_event, window) => {
         fs
           .readFileSync(path.join(temp, "connections.json"), "utf8")
           .includes("ftp-password"),
-        false,
+        true,
       );
       await run(
         `Array.from(document.querySelectorAll('button')).find(b => b.innerText === '导出连接').click()`,
@@ -266,6 +266,136 @@ app.on("browser-window-created", (_event, window) => {
       const terminalId = await run(
         `document.querySelector('.terminal-pane').closest('.session').dataset.sessionId`,
       );
+      // The compact toolbar replaces the old heading, terminal bar and footer.
+      assert.equal(
+        await run(
+          `document.querySelectorAll('.session-heading, .terminal-pane .pane-title, .session-footer').length`,
+        ),
+        0,
+      );
+      assert.ok(
+        await run(
+          `document.querySelector('.session-toolbar .session-address').textContent.includes('@127.0.0.1')`,
+        ),
+      );
+      // Terminal find bar opens with the documented shortcut and searches scrollback.
+      const findShortcutInit =
+        process.platform === "darwin"
+          ? "{ key: 'f', metaKey: true }"
+          : "{ key: 'f', ctrlKey: true, shiftKey: true }";
+      const pressFindShortcut = () =>
+        run(
+          `window.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...${findShortcutInit} }))`,
+        );
+      assert.ok(await run(`!!document.querySelector('.terminal-find-toggle')`));
+      await pressFindShortcut();
+      await waitFor(
+        `!!document.querySelector('.terminal-search') && document.activeElement === document.querySelector('.terminal-search input')`,
+      );
+      await run(`(() => {
+        const input = document.querySelector('.terminal-search input');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'TERMINAL_READY');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+      await waitFor(
+        `document.querySelector('.terminal-search-count')?.textContent === '1 / 1'`,
+      );
+      await waitFor(
+        `!!document.querySelector('.xterm-find-result-decoration')`,
+      );
+      fs.writeFileSync(
+        path.join(temp, "terminal-search.png"),
+        (await window.webContents.capturePage()).toPNG(),
+      );
+      await run(
+        `document.querySelector('.terminal-search input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`,
+      );
+      await waitFor(
+        `!document.querySelector('.terminal-search') && document.activeElement?.classList.contains('xterm-helper-textarea')`,
+      );
+      await run(`document.querySelector('.terminal-find-toggle').click()`);
+      await waitFor(`!!document.querySelector('.terminal-search')`);
+      await run(
+        `document.querySelector('.terminal-search .icon-button:last-child').click()`,
+      );
+      await waitFor(`!document.querySelector('.terminal-search')`);
+      // Focus mode hides navigation chrome and the file pane, then restores both.
+      const sshFilePane = `.session[data-session-id="${terminalId}"] .file-pane`;
+      await run(`document.querySelector('.focus-toggle').click()`);
+      await waitFor(
+        `(() => {
+          const app = document.querySelector('.app');
+          const display = (selector) => getComputedStyle(document.querySelector(selector)).display;
+          return app.classList.contains('focus') && display('.sidebar') === 'none' && display('.tabbar') === 'none' && display('${sshFilePane}') === 'none' && display('.session[data-session-id="${terminalId}"] .session-toolbar') === 'none';
+        })()`,
+      );
+      fs.writeFileSync(
+        path.join(temp, "terminal-focus.png"),
+        (await window.webContents.capturePage()).toPNG(),
+      );
+      await run(`document.querySelector('.focus-toggle').click()`);
+      await waitFor(
+        `!document.querySelector('.app').classList.contains('focus') && getComputedStyle(document.querySelector('.tabbar')).display !== 'none' && getComputedStyle(document.querySelector('${sshFilePane}')).display !== 'none'`,
+      );
+      // Focus shortcut is owned by the 显示 menu (⌘M / Ctrl+Shift+M).
+      const focusAccelerator =
+        process.platform === "darwin" ? "Command+M" : "Control+Shift+M";
+      const menuItems = Menu.getApplicationMenu().items.flatMap(
+        (item) => item.submenu?.items ?? [],
+      );
+      const focusItem = menuItems.find((item) => item.label === "专注模式");
+      assert.ok(focusItem);
+      assert.equal(focusItem.accelerator, focusAccelerator);
+      if (process.platform === "darwin") {
+        const minimizeItem = menuItems.find((item) => item.label === "最小化");
+        assert.ok(minimizeItem);
+        assert.notEqual(minimizeItem.accelerator, "Command+M");
+      }
+      focusItem.click(focusItem, window, {});
+      await waitFor(
+        `document.querySelector('.app').classList.contains('focus')`,
+      );
+      focusItem.click(focusItem, window, {});
+      await waitFor(
+        `!document.querySelector('.app').classList.contains('focus')`,
+      );
+      // Sidebar and file pane separators resize the panels and remember widths.
+      const dragSeparator = async (separator, target, deltaX) => {
+        const before = await run(
+          `document.querySelector('${target}').getBoundingClientRect().width`,
+        );
+        await run(`(() => {
+          const handle = document.querySelector('${separator}');
+          const rect = handle.getBoundingClientRect();
+          const init = { bubbles: true, cancelable: true, pointerId: 21, pointerType: 'mouse', button: 0, clientX: rect.x + 3, clientY: rect.y + rect.height / 2 };
+          handle.dispatchEvent(new PointerEvent('pointerdown', init));
+          window.dispatchEvent(new PointerEvent('pointermove', { ...init, clientX: init.clientX + ${deltaX} }));
+          window.dispatchEvent(new PointerEvent('pointerup', { ...init, clientX: init.clientX + ${deltaX} }));
+        })()`);
+        await waitFor(
+          `document.querySelector('${target}').getBoundingClientRect().width > ${before + Math.abs(deltaX) - 10}`,
+        );
+        return before;
+      };
+      const sidebarBefore = await dragSeparator(
+        ".sidebar-resizer",
+        ".sidebar",
+        40,
+      );
+      const filePaneBefore = await dragSeparator(
+        ".file-resizer",
+        sshFilePane,
+        -50,
+      );
+      assert.ok(sidebarBefore > 0 && filePaneBefore > 0);
+      assert.ok(
+        Number(await run(`localStorage.getItem('trident.sidebar-width')`)) >
+          sidebarBefore,
+      );
+      assert.ok(
+        Number(await run(`localStorage.getItem('trident.file-pane-width')`)) >
+          filePaneBefore,
+      );
       await selectTheme("light");
       await waitFor(`document.documentElement.dataset.theme === 'light'`);
       assert.ok(
@@ -361,7 +491,7 @@ app.on("browser-window-created", (_event, window) => {
       );
       // Hide without unmounting: retain panel state and resize the live terminal.
       const terminalWidth = await run(
-        `document.querySelector('.xterm-screen').clientWidth`,
+        `document.querySelector('.terminal-host').clientWidth`,
       );
       await run(`(() => {
         window.sshPane = document.querySelector('.terminal-pane').closest('.session');
@@ -370,7 +500,7 @@ app.on("browser-window-created", (_event, window) => {
         window.savedFilePane.querySelector('button[aria-label="隐藏文件面板"]').click();
       })()`);
       await waitFor(
-        `window.savedFilePane.hidden && window.savedFilePane.getBoundingClientRect().width === 0 && document.querySelector('.xterm-screen').clientWidth > ${terminalWidth}`,
+        `window.savedFilePane.hidden && window.savedFilePane.getBoundingClientRect().width === 0 && document.querySelector('.terminal-host').clientWidth > ${terminalWidth}`,
       );
       assert.ok(
         await run(
@@ -382,7 +512,7 @@ app.on("browser-window-created", (_event, window) => {
         false,
       );
       const expandedWidth = await run(
-        `document.querySelector('.xterm-screen').clientWidth`,
+        `document.querySelector('.terminal-host').clientWidth`,
       );
       await run(`window.savedSidebar = document.querySelector('.sidebar')`);
       assert.equal(
@@ -411,7 +541,7 @@ app.on("browser-window-created", (_event, window) => {
       };
       await toggleSidebar();
       await waitFor(
-        `window.savedSidebar.hidden && window.savedSidebar.getBoundingClientRect().width === 0 && document.querySelector('.xterm-screen').clientWidth > ${expandedWidth}`,
+        `window.savedSidebar.hidden && window.savedSidebar.getBoundingClientRect().width === 0 && document.querySelector('.terminal-host').clientWidth > ${expandedWidth}`,
       );
       assert.equal(
         await run(
@@ -444,7 +574,7 @@ app.on("browser-window-created", (_event, window) => {
       );
       await toggleSidebar();
       await waitFor(
-        `!window.savedSidebar.hidden && Math.abs(document.querySelector('.xterm-screen').clientWidth - ${expandedWidth}) < 2`,
+        `!window.savedSidebar.hidden && Math.abs(document.querySelector('.terminal-host').clientWidth - ${expandedWidth}) < 2`,
       );
       assert.ok(
         await run(
@@ -457,7 +587,7 @@ app.on("browser-window-created", (_event, window) => {
       );
       await run(`window.sshPane.querySelector('.file-panel-toggle').click()`);
       await waitFor(
-        `!window.savedFilePane.hidden && Math.abs(document.querySelector('.xterm-screen').clientWidth - ${terminalWidth}) < 2`,
+        `!window.savedFilePane.hidden && Math.abs(document.querySelector('.terminal-host').clientWidth - ${terminalWidth}) < 2`,
       );
       assert.ok(
         await run(
@@ -476,7 +606,7 @@ app.on("browser-window-created", (_event, window) => {
       const savedImage = await window.webContents.capturePage();
       fs.writeFileSync(path.join(temp, "connections.png"), savedImage.toPNG());
       console.log(
-        `UI smoke passed: app/terminal themes, collapsible sidebar/file panel, FTP operations, encrypted credentials/backups, SSH bulk output and background tabs. Screenshots: ${temp}`,
+        `UI smoke passed: app/terminal themes, terminal find bar, focus mode, resizable/collapsible sidebar and file panel, FTP operations, local credentials/encrypted backups, SSH bulk output and background tabs. Screenshots: ${temp}`,
       );
       clearTimeout(timer);
       // Exit directly: destroying the last window first triggers app.quit() on

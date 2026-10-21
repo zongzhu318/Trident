@@ -1,4 +1,12 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   ArrowDownToLine,
   ArrowUp,
@@ -32,6 +40,8 @@ const FileBrowser = memo(function FileBrowser({
   enabled,
   transfer,
   collapsed = false,
+  width = null,
+  onWidthChange,
   onHide,
 }: {
   id: string;
@@ -39,6 +49,8 @@ const FileBrowser = memo(function FileBrowser({
   enabled: boolean;
   transfer: Transfer | null;
   collapsed?: boolean;
+  width?: number | null;
+  onWidthChange?(width: number | null): void;
   onHide?: () => void;
 }) {
   const [directory, setDirectory] = useState("");
@@ -116,8 +128,69 @@ const FileBrowser = memo(function FileBrowser({
   const blocked = busy || !enabled || !directory;
   const download = (file: RemoteFile) =>
     perform(() => api.download(id, join(directory, file.name)));
+  function beginResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || !onWidthChange) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth =
+      event.currentTarget.parentElement?.getBoundingClientRect().width ?? 340;
+    let width = startWidth;
+    const move = (e: PointerEvent) => {
+      width = Math.min(560, Math.max(260, startWidth - (e.clientX - startX)));
+      onWidthChange?.(width);
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.classList.remove("resizing");
+      localStorage.setItem(
+        "trident.file-pane-width",
+        String(Math.round(width)),
+      );
+    };
+    document.body.classList.add("resizing");
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  }
+  function nudgeResize(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (!onWidthChange) return;
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const current =
+      event.currentTarget.parentElement?.getBoundingClientRect().width ?? 340;
+    const width = Math.min(
+      560,
+      Math.max(260, current + (event.key === "ArrowLeft" ? 16 : -16)),
+    );
+    onWidthChange(width);
+    localStorage.setItem("trident.file-pane-width", String(Math.round(width)));
+  }
+  function resetWidth() {
+    onWidthChange?.(null);
+    localStorage.removeItem("trident.file-pane-width");
+  }
   return (
-    <aside className="file-pane" id={`files-${id}`} hidden={collapsed}>
+    <aside
+      className="file-pane"
+      id={`files-${id}`}
+      hidden={collapsed}
+      style={onHide && width ? { width } : undefined}
+    >
+      {onHide && (
+        <div
+          className="panel-resizer file-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整文件面板宽度"
+          title="拖拽调整文件面板宽度，双击恢复默认"
+          tabIndex={0}
+          onPointerDown={beginResize}
+          onKeyDown={nudgeResize}
+          onDoubleClick={resetWidth}
+        />
+      )}
       <div className="pane-title">
         <Folder size={14} />
         远程文件<span>{protocol.toUpperCase()}</span>

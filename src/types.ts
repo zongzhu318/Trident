@@ -43,6 +43,7 @@ declare global {
       setTheme(mode: ThemeMode): Promise<ThemeState>;
       setTerminalTheme(id: TerminalThemeId): Promise<ThemeState>;
       onThemeChanged(callback: (theme: ThemeState) => void): () => void;
+      onToggleFocus(callback: () => void): () => void;
       acknowledge(id: string, bytes: number): void;
       onSessionEvent(
         id: string,

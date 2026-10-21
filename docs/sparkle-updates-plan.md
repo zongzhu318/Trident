@@ -10,7 +10,7 @@
 
 发布流程现同时构建 macOS arm64 DMG 和 Windows x64 NSIS exe，工作流文件为 `.github/workflows/release.yml`，Actions 显示名称为「发布 macOS / Windows 版本」。沿用手动触发、自动递增版本和自动创建 Tag 的现有流程。
 
-新增的 `build-windows` job 在 `windows-2022` 上运行，使用 prepare 阶段的同一个提交和版本号，不读取 Sparkle 私钥。它执行 Windows 协议/UI 测试，构建 `Trident-<版本>-windows-x64-setup.exe`，再静默安装、启动实际安装的应用检查版本/UI/DPAPI、退出并卸载。两个平台构建成功后，publish job 才创建标签并上传所有资产，SHA256SUMS 同时覆盖 DMG、exe 和 macOS appcast。
+新增的 `build-windows` job 在 `windows-2022` 上运行，使用 prepare 阶段的同一个提交和版本号，不读取 Sparkle 私钥。它执行 Windows 协议/UI 测试，构建 `Trident-<版本>-windows-x64-setup.exe`，再静默安装、启动实际安装的应用检查版本/UI/菜单、退出并卸载。两个平台构建成功后，publish job 才创建标签并上传所有资产，SHA256SUMS 同时覆盖 DMG、exe 和 macOS appcast。
 
 Windows CI 和发布任务缓存 Electron 下载包及 electron-builder / NSIS 工具，按系统、架构和 `package-lock.json` 区分；首次运行仍需下载。UI 测试构建的前端直接交给 `npm run package:win:built` 打包，避免重复构建。该命令要求已有最新 `dist/`，本地完整打包仍使用 `npm run package:win`。
 

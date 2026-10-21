@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Check, Folder, LoaderCircle, ShieldCheck, X, Zap } from "lucide-react";
+import { Check, Folder, LoaderCircle, ShieldAlert, X, Zap } from "lucide-react";
 import type { Profile, Credentials } from "./types";
 import { errorText } from "./errors";
 const api = window.trident;
@@ -277,9 +277,9 @@ export default function ConnectionModal({
                 />
                 在本机保存{profile.auth === "key" ? "私钥口令" : "密码"}
               </label>
-              <div className="inline-note">
-                <ShieldCheck size={15} />
-                凭据加密保存到本机磁盘；取消勾选并保存将清除已存凭据。
+              <div className="inline-note warning">
+                <ShieldAlert size={15} />
+                凭据以明文保存到本机磁盘，仅依赖文件权限保护；取消勾选并保存将清除已存凭据。
               </div>
             </>
           )}

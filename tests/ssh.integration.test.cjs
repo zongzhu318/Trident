@@ -8,8 +8,6 @@ const path = require("node:path");
 const Module = require("node:module");
 const { Server, utils } = require("ssh2");
 const startFTP = require("./helpers/ftp-server.cjs");
-const testStorage = require("./helpers/crypto-storage.cjs");
-
 test(
   "real SSH and SFTP through the application IPC handlers",
   { timeout: 30000 },
@@ -244,9 +242,11 @@ test(
         themeSource: "system",
         shouldUseDarkColors: true,
       }),
-      safeStorage: testStorage(),
       app: Object.assign(new EventEmitter(), {
         getPath: () => root,
+        getVersion: () => "0.0.1",
+        setName() {},
+        setAboutPanelOptions() {},
         whenReady: () => ({
           then: (fn) => {
             startup = Promise.resolve().then(fn);
@@ -551,7 +551,7 @@ test(
       },
     );
     await t.test(
-      "saved passwords connect without being exposed, and encrypted backup import adds independent records",
+      "saved passwords connect without being exposed to the renderer, and encrypted backup import adds independent records",
       async () => {
         let profiles = await invoke(
           "profiles:save",
@@ -564,8 +564,10 @@ test(
         const stored = JSON.parse(
           fs.readFileSync(path.join(root, "connections.json"), "utf8"),
         );
-        assert.ok(stored[0].secret);
-        assert.equal(JSON.stringify(stored).includes("test-password"), false);
+        assert.equal(
+          JSON.parse(stored[0].secret).credentials.password,
+          "test-password",
+        );
         await invoke("ssh:connect", "saved", profile, {});
         await invoke("ssh:disconnect", "saved");
         await assert.rejects(

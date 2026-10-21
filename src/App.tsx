@@ -1,5 +1,10 @@
-import { appModifier, shortcutPrefix } from "./platform";
-import { useEffect, useState } from "react";
+import { appModifier, isMac, shortcutPrefix } from "./platform";
+import {
+  useEffect,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   ArrowDownToLine,
   ArrowRight,
@@ -9,6 +14,8 @@ import {
   Folder,
   KeyRound,
   LockKeyhole,
+  Maximize2,
+  Minimize2,
   Sun,
   PanelLeftClose,
   PanelLeftOpen,
@@ -30,12 +37,26 @@ import { useTheme, type ThemeMode } from "./theme";
 import { errorText } from "./errors";
 
 const api = window.trident;
+const focusShortcut = isMac ? "⌘M" : "Ctrl+Shift+M";
+const SIDEBAR_MIN = 180;
+const SIDEBAR_MAX = 420;
+const storedWidth = (key: string, min: number, max: number) => {
+  const value = Number(localStorage.getItem(key));
+  return value >= min && value <= max ? value : null;
+};
 export default function App() {
   const theme = useTheme();
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [active, setActive] = useState("home");
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [focusMode, setFocusMode] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState<number | null>(() =>
+    storedWidth("trident.sidebar-width", SIDEBAR_MIN, SIDEBAR_MAX),
+  );
+  const [filePaneWidth, setFilePaneWidth] = useState<number | null>(() =>
+    storedWidth("trident.file-pane-width", 260, 560),
+  );
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState<{
     profile?: Profile;
@@ -50,6 +71,55 @@ export default function App() {
       .then(setProfiles)
       .catch((e) => setError(errorText(e)));
   }, []);
+  useEffect(() => {
+    if (active === "home") setFocusMode(false);
+  }, [active]);
+  useEffect(() => {
+    if (active === "home") return;
+    return api.onToggleFocus(() => setFocusMode((value) => !value));
+  }, [active]);
+  function beginSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth =
+      event.currentTarget.parentElement?.getBoundingClientRect().width ?? 234;
+    let width = startWidth;
+    const move = (e: PointerEvent) => {
+      width = Math.min(
+        SIDEBAR_MAX,
+        Math.max(SIDEBAR_MIN, startWidth + e.clientX - startX),
+      );
+      setSidebarWidth(width);
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.classList.remove("resizing");
+      localStorage.setItem("trident.sidebar-width", String(Math.round(width)));
+    };
+    document.body.classList.add("resizing");
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  }
+  function resetSidebarWidth() {
+    setSidebarWidth(null);
+    localStorage.removeItem("trident.sidebar-width");
+  }
+  function nudgeSidebar(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const current =
+      event.currentTarget.parentElement?.getBoundingClientRect().width ?? 234;
+    const width = Math.min(
+      SIDEBAR_MAX,
+      Math.max(SIDEBAR_MIN, current + (event.key === "ArrowRight" ? 16 : -16)),
+    );
+    setSidebarWidth(width);
+    localStorage.setItem("trident.sidebar-width", String(Math.round(width)));
+  }
   function stepSession(delta: number) {
     if (!sessions.length) return;
     const index = sessions.findIndex((s) => s.id === active);
@@ -149,7 +219,7 @@ export default function App() {
       .includes(search.toLowerCase()),
   );
   return (
-    <div className="app">
+    <div className={`app${focusMode ? " focus" : ""}`}>
       <header className="titlebar">
         <div className="traffic-space" />
         <button
@@ -175,12 +245,24 @@ export default function App() {
         <strong>Trident</strong>
         <span className="titlebar-sub">你的远程工作空间</span>
         <span className="titlebar-right">SSH · SFTP · FTP</span>
+        {active !== "home" && (
+          <button
+            className="focus-toggle"
+            aria-label={focusMode ? "退出专注模式" : "进入专注模式"}
+            aria-pressed={focusMode}
+            title={`${focusMode ? "退出" : "进入"}专注模式（${focusShortcut}）`}
+            onClick={() => setFocusMode((value) => !value)}
+          >
+            {focusMode ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+          </button>
+        )}
       </header>
       <div className="layout">
         <aside
           className="sidebar"
           id="connection-sidebar"
           hidden={!sidebarVisible}
+          style={sidebarWidth ? { width: sidebarWidth } : undefined}
         >
           <div className="workspace-name">
             <div className="workspace-avatar">
@@ -274,7 +356,7 @@ export default function App() {
             <div className="security-note">
               <ShieldCheck size={17} />
               <span>
-                安全连接，专注工作<small>可选本机凭据加密保存与备份</small>
+                安全连接，专注工作<small>可选本机凭据保存与加密备份</small>
               </span>
             </div>
             <button className="help-button" onClick={() => setHelp(true)}>
@@ -282,6 +364,17 @@ export default function App() {
               使用指南<span>v0.0.1</span>
             </button>
           </div>
+          <div
+            className="panel-resizer sidebar-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整侧边栏宽度"
+            title="拖拽调整侧边栏宽度，双击恢复默认"
+            tabIndex={0}
+            onPointerDown={beginSidebarResize}
+            onKeyDown={nudgeSidebar}
+            onDoubleClick={resetSidebarWidth}
+          />
         </aside>
         <main>
           <nav className="tabbar">
@@ -523,6 +616,8 @@ export default function App() {
               key={session.id}
               session={session}
               visible={active === session.id}
+              filePaneWidth={filePaneWidth}
+              onFilePaneWidthChange={setFilePaneWidth}
             />
           ))}
         </main>
@@ -564,16 +659,21 @@ export default function App() {
             </p>
             <p>
               首次连接时，请向管理员核对服务器的 SHA256
-              指纹，再选择信任。密码和私钥口令可勾选加密保存在本机磁盘。
+              指纹，再选择信任。密码和私钥口令可勾选保存在本机磁盘（明文存储，请确保本机账户安全）。
             </p>
             <p>
               终端支持交互式命令、颜色、Vim / htop 等全屏工具，以及{" "}
               {shortcutPrefix}C / {shortcutPrefix}V 复制粘贴。按 Ctrl+C
-              中断远程命令。
+              中断远程命令，按 {shortcutPrefix}F 查找终端输出，Enter /
+              Shift+Enter 跳转匹配，Esc 关闭。
             </p>
             <p>
               文件面板支持目录浏览、新建目录、上传下载、重命名和删除文件或空目录。选中文件后使用工具栏操作；双击目录进入，双击普通文件下载。符号链接不打开。FTP
               上传会预先检查同名文件，SFTP 使用独占创建。
+            </p>
+            <p>
+              按 {focusShortcut}{" "}
+              进入专注模式，隐藏侧栏、标签栏和会话信息栏；拖拽侧栏或文件面板的分隔条可调整宽度，双击恢复默认。
             </p>
             <p>
               支持 SSH、独立 SFTP、FTP 和显式
