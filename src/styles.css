@@ -995,9 +995,6 @@ h2 {
   align-items: center;
   margin-bottom: 14px;
 }
-.inline-note.warning {
-  color: var(--warning);
-}
 .modal-footer {
   display: flex;
   align-items: center;
