@@ -60,17 +60,22 @@ function publishTheme() {
 let persistQueue = Promise.resolve();
 let configurationQueue = Promise.resolve();
 let updater;
+let quitting = false;
+// Cmd+Q / 菜单退出是强制退出：不拦截 before-quit，只记录状态，避免窗口 close
+// 处理器在退出过程中再弹一次「断开所有连接？」确认框。落盘由 IPC 处理器自行 await。
+app.on("before-quit", () => {
+  quitting = true;
+});
 const quitter = createQuitCoordinator({
-  app,
   confirm: async () => {
     if (!sessions.size) return true;
     // 异步弹窗：等待用户选择期间主进程保持响应，界面不会被冻结或拒绝请求
     const { response } = await dialog.showMessageBox(window, {
       type: "warning",
-      message: "断开所有连接并退出？",
+      message: "断开所有连接并安装更新？",
       detail:
-        "退出或安装更新会中断远程终端和正在传输的文件。可取消并在操作完成后重试。",
-      buttons: ["取消", "断开并退出"],
+        "安装更新会中断远程终端和正在传输的文件。可取消，待操作完成后再试。",
+      buttons: ["取消", "断开并安装"],
       defaultId: 0,
       cancelId: 0,
     });
@@ -84,7 +89,7 @@ const quitter = createQuitCoordinator({
     for (const id of sessions.keys()) disconnect(id);
   },
   showError: (error) =>
-    dialog.showErrorBox("无法安全退出", `配置尚未保存：${error.message}`),
+    dialog.showErrorBox("无法完成更新", `配置尚未保存：${error.message}`),
 });
 const dev = process.argv.includes("--dev");
 const emit = (id, type, data) => {
@@ -700,7 +705,7 @@ function createWindow() {
     for (const id of sessions.keys()) disconnect(id);
   });
   window.on("close", (event) => {
-    if (quitter.prepared) return;
+    if (quitting || quitter.prepared) return;
     if (!sessions.size) return;
     const response = dialog.showMessageBoxSync(window, {
       type: "question",
@@ -857,6 +862,8 @@ app
     );
     createWindow();
     app.on("activate", () => {
+      // 退出准备完成后不再复活窗口：重新打开只会撞上被拒绝的 IPC 并显示误导性横幅
+      if (quitter.prepared) return;
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
   })

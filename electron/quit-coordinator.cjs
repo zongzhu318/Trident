@@ -1,8 +1,8 @@
-// Covers menu quit, Sparkle's Cocoa termination request and pending install.
-// Never permit termination until settings are durable; do not double-prompt.
-// The renderer stays usable until the user confirms quitting: only after
-// confirm() resolves true do stateful IPC requests get rejected.
-function createQuitCoordinator({ app, confirm, flush, disconnect, showError }) {
+// Guards the updater flows that must finish writing state and close sessions
+// before the process is replaced (Sparkle pending install, Windows relaunch).
+// Menu quit (Cmd+Q) is deliberately not routed through here: it is a force
+// quit and terminates the process without waiting for anything.
+function createQuitCoordinator({ confirm, flush, disconnect, showError }) {
   let prepared = false;
   let pending;
   let closing = false;
@@ -33,14 +33,6 @@ function createQuitCoordinator({ app, confirm, flush, disconnect, showError }) {
       pending = undefined;
     }
   }
-  app.on("before-quit", (event) => {
-    if (prepared) return;
-    event.preventDefault();
-    if (!pending)
-      void prepare().then((ok) => {
-        if (ok) app.quit();
-      });
-  });
   return {
     prepare,
     cancelPreparation() {

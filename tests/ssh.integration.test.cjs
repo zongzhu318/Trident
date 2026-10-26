@@ -701,18 +701,16 @@ test(
       },
     );
     await t.test(
-      "quit preparation keeps the theme readable but rejects stateful IPC, and cannot be re-entered",
+      "menu quit is not intercepted and leaves IPC usable",
       async () => {
-        electron.app.emit("before-quit", { preventDefault() {} });
+        // Cmd+Q 是强制退出：不得阻断默认终止，也不额外发起一次 quit
+        electron.app.emit("before-quit", { preventDefault: assert.fail });
         await new Promise((resolve) => setTimeout(resolve, 20));
-        assert.equal(quitRequests, 1);
+        assert.equal(quitRequests, 0);
         assert.equal((await invoke("theme:get")).mode, "system");
-        await assert.rejects(async () => invoke("profiles:list"), /请稍候/);
-        await assert.rejects(async () => invoke("theme:set", "dark"), /请稍候/);
-        await assert.rejects(
-          async () => invoke("theme:terminal-set", "nord"),
-          /请稍候/,
-        );
+        assert.ok(Array.isArray(await invoke("profiles:list")));
+        assert.equal((await invoke("theme:set", "dark")).mode, "dark");
+        await invoke("theme:set", "system");
       },
     );
   },

@@ -1,21 +1,16 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { EventEmitter } = require("node:events");
 const { createQuitCoordinator } = require("../electron/quit-coordinator.cjs");
 const { createUpdater } = require("../electron/updater.cjs");
 
-test("quit waits for persistence, blocks new work and does not duplicate prompts", async () => {
-  const app = new EventEmitter();
-  let quit = 0,
-    prompts = 0,
+test("preparation flushes state, disconnects once and is not repeated", async () => {
+  let prompts = 0,
     closed = 0,
     finish;
-  app.quit = () => quit++;
   const flushed = new Promise((resolve) => {
     finish = resolve;
   });
   const q = createQuitCoordinator({
-    app,
     confirm: () => {
       prompts++;
       return true;
@@ -24,35 +19,24 @@ test("quit waits for persistence, blocks new work and does not duplicate prompts
     disconnect: () => closed++,
     showError: assert.fail,
   });
-  let prevented = 0;
-  app.emit("before-quit", {
-    preventDefault() {
-      prevented++;
-    },
-  });
-  app.emit("before-quit", {
-    preventDefault() {
-      prevented++;
-    },
-  });
+  const first = q.prepare();
+  const second = q.prepare();
   await new Promise((resolve) => setImmediate(resolve));
   assert.throws(() => q.assertOpen(), /正在保存/);
   assert.equal(closed, 0);
   finish();
-  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await first, true);
+  assert.equal(await second, true);
   assert.equal(prompts, 1);
-  assert.equal(prevented, 2);
   assert.equal(closed, 1);
-  assert.equal(quit, 1);
-  app.emit("before-quit", { preventDefault: assert.fail });
+  assert.equal(await q.prepare(), true);
+  assert.equal(prompts, 1);
+  assert.equal(closed, 1);
 });
 
 test("the renderer stays usable while the quit confirmation is pending", async () => {
   let resolveConfirm;
-  const app = new EventEmitter();
-  app.quit = () => {};
   const q = createQuitCoordinator({
-    app,
     confirm: () =>
       new Promise((resolve) => {
         resolveConfirm = resolve;
@@ -61,20 +45,18 @@ test("the renderer stays usable while the quit confirmation is pending", async (
     disconnect: () => {},
     showError: assert.fail,
   });
-  app.emit("before-quit", { preventDefault() {} });
+  const pending = q.prepare();
   await new Promise((resolve) => setImmediate(resolve));
   q.assertOpen();
   resolveConfirm(true);
-  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await pending, true);
   assert.throws(() => q.assertOpen(), /正在保存/);
 });
 
 test("cancel or failed save prevents exit and permits further use", async () => {
   for (const failure of [false, true]) {
-    const app = new EventEmitter();
     const errors = [];
     const q = createQuitCoordinator({
-      app,
       confirm: () => failure,
       flush: async () => {
         throw new Error("disk full");
@@ -89,14 +71,12 @@ test("cancel or failed save prevents exit and permits further use", async () => 
 });
 
 test("aborted installation unlocks the application and invalidates pending preparation", async () => {
-  const app = new EventEmitter();
   let finish;
   const flushed = new Promise((resolve) => {
     finish = resolve;
   });
   let disconnected = 0;
   const q = createQuitCoordinator({
-    app,
     confirm: () => true,
     flush: () => flushed,
     disconnect: () => disconnected++,
