@@ -1,6 +1,8 @@
 import { appModifier, isMac, shortcutPrefix } from "./platform";
 import {
   useEffect,
+  useLayoutEffect,
+  useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -65,6 +67,37 @@ export default function App() {
   const [error, setError] = useState("");
   const [help, setHelp] = useState(false);
   const [backup, setBackup] = useState<"import" | "export" | null>(null);
+  const [tabMenu, setTabMenu] = useState<{
+    id: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const tabMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!tabMenu) return;
+    const close = () => setTabMenu(null);
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("blur", close);
+    window.addEventListener("keydown", keydown);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("keydown", keydown);
+    };
+  }, [tabMenu]);
+  useLayoutEffect(() => {
+    const element = tabMenuRef.current;
+    if (!element || !tabMenu) return;
+    const rect = element.getBoundingClientRect();
+    element.style.left = `${Math.max(8, Math.min(tabMenu.x, window.innerWidth - rect.width - 8))}px`;
+    element.style.top = `${Math.max(8, Math.min(tabMenu.y, window.innerHeight - rect.height - 8))}px`;
+    element.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+  }, [tabMenu]);
   useEffect(() => {
     api
       ?.profiles()
@@ -214,6 +247,48 @@ export default function App() {
     setSessions((items) => items.filter((s) => s.id !== id));
     if (active === id) setActive("home");
   }
+  function duplicateSession(session: Session) {
+    const saved = profiles.find((p) => p.id === session.profile.id);
+    if (
+      session.profile.auth === "password" &&
+      !saved?.hasSavedCredentials &&
+      !session.credentials.password
+    ) {
+      setModal({ profile: session.profile, connect: true });
+      return;
+    }
+    const copy: Session = {
+      id: crypto.randomUUID(),
+      profile: session.profile,
+      credentials: { ...session.credentials },
+    };
+    setSessions((items) => {
+      const index = items.findIndex((s) => s.id === session.id);
+      const next = [...items];
+      next.splice(index === -1 ? next.length : index + 1, 0, copy);
+      return next;
+    });
+    setActive(copy.id);
+  }
+  async function disconnectSessions(ids: string[]) {
+    await Promise.all(ids.map((id) => api.disconnect(id).catch(() => {})));
+    setSessions((items) => items.filter((s) => !ids.includes(s.id)));
+  }
+  async function closeOtherSessions(id: string) {
+    const ids = sessions.filter((s) => s.id !== id).map((s) => s.id);
+    if (!ids.length) return;
+    if (!window.confirm(`关闭其余 ${ids.length} 个标签页并断开连接？`)) return;
+    await disconnectSessions(ids);
+    setActive(id);
+  }
+  async function closeSessionsRightOf(id: string) {
+    const index = sessions.findIndex((s) => s.id === id);
+    const ids = sessions.slice(index + 1).map((s) => s.id);
+    if (!ids.length) return;
+    if (!window.confirm(`关闭右侧 ${ids.length} 个标签页并断开连接？`)) return;
+    await disconnectSessions(ids);
+    if (ids.includes(active)) setActive(id);
+  }
   async function deleteProfile(profile: Profile) {
     if (!window.confirm(`删除连接「${profile.name}」？`)) return;
     try {
@@ -227,6 +302,12 @@ export default function App() {
       .toLowerCase()
       .includes(search.toLowerCase()),
   );
+  const menuSession = tabMenu
+    ? sessions.find((s) => s.id === tabMenu.id)
+    : undefined;
+  const menuIndex = menuSession
+    ? sessions.findIndex((s) => s.id === menuSession.id)
+    : -1;
   return (
     <div className={`app${focusMode ? " focus" : ""}`}>
       <header className="titlebar">
@@ -398,6 +479,10 @@ export default function App() {
               <div
                 className={`tab ${active === s.id ? "active" : ""}`}
                 key={s.id}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setTabMenu({ id: s.id, x: e.clientX, y: e.clientY });
+                }}
               >
                 <button onClick={() => setActive(s.id)}>
                   {s.profile.protocol === "ssh" ? (
@@ -689,6 +774,62 @@ export default function App() {
               FTPS。导出可选择包含已保存凭据的加密备份，导入先预览再新增连接。暂不支持目录递归传输、跳板机和交互式多因素认证。
             </p>
           </section>
+        </div>
+      )}
+      {tabMenu && menuSession && (
+        <div
+          className="tab-menu"
+          role="menu"
+          ref={tabMenuRef}
+          style={{ left: tabMenu.x, top: tabMenu.y }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <button
+            role="menuitem"
+            onClick={() => {
+              setTabMenu(null);
+              duplicateSession(menuSession);
+            }}
+          >
+            拷贝标签页
+          </button>
+          <div className="tab-menu-separator" role="separator" />
+          <button
+            role="menuitem"
+            onClick={() => {
+              setTabMenu(null);
+              void closeSession(menuSession.id).catch((e) =>
+                setError(errorText(e)),
+              );
+            }}
+          >
+            关闭
+          </button>
+          <button
+            role="menuitem"
+            disabled={sessions.length < 2}
+            onClick={() => {
+              setTabMenu(null);
+              void closeOtherSessions(menuSession.id).catch((e) =>
+                setError(errorText(e)),
+              );
+            }}
+          >
+            关闭其他标签页
+          </button>
+          <button
+            role="menuitem"
+            disabled={menuIndex === sessions.length - 1}
+            onClick={() => {
+              setTabMenu(null);
+              void closeSessionsRightOf(menuSession.id).catch((e) =>
+                setError(errorText(e)),
+              );
+            }}
+          >
+            关闭右侧标签页
+          </button>
         </div>
       )}
     </div>

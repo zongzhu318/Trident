@@ -257,6 +257,7 @@ app.on("browser-window-created", (_event, window) => {
         for (const [input, value] of [[inputs[0], 'Terminal fixture'], [inputs[1], '127.0.0.1'], [document.querySelector('.modal input[type="number"]'), '${sshServer.port}'], [document.querySelector('.modal input[type="password"]'), 'test-password']]) {
           set.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true }));
         }
+        document.querySelector('.remember-option input').click();
       })()`);
       await new Promise((r) => setTimeout(r, 100));
       await run(`document.querySelector('.modal form').requestSubmit()`);
@@ -602,11 +603,66 @@ app.on("browser-window-created", (_event, window) => {
         path.join(temp, "terminal-dark.png"),
         (await window.webContents.capturePage()).toPNG(),
       );
+      // Tab context menu: copy the current tab, plus close actions and their disabled states.
+      const openTabMenu = (name) =>
+        run(`(() => {
+          const tab = Array.from(document.querySelectorAll('.tabbar .tab')).find((t) => t.innerText.includes(${JSON.stringify(name)}));
+          if (!tab) return false;
+          const rect = tab.getBoundingClientRect();
+          tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.x + 24, clientY: rect.y + 12 }));
+          return true;
+        })()`);
+      const menuLabels = () =>
+        run(
+          `Array.from(document.querySelectorAll('.tab-menu button')).map((b) => ({ label: b.innerText, disabled: b.disabled }))`,
+        );
+      assert.ok(await openTabMenu("本机测试服务器"));
+      await waitFor(`!!document.querySelector('.tab-menu')`);
+      const ftpMenu = await menuLabels();
+      assert.deepEqual(
+        ftpMenu.map((item) => item.label),
+        ["拷贝标签页", "关闭", "关闭其他标签页", "关闭右侧标签页"],
+      );
+      assert.equal(ftpMenu[3].disabled, false);
+      await run(
+        `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`,
+      );
+      await waitFor(`!document.querySelector('.tab-menu')`);
+      assert.ok(await openTabMenu("Terminal fixture"));
+      await waitFor(`!!document.querySelector('.tab-menu')`);
+      assert.equal(
+        (await menuLabels())[3].disabled,
+        true,
+        "关闭右侧标签页 should be disabled for the last tab",
+      );
+      fs.writeFileSync(
+        path.join(temp, "tab-menu.png"),
+        (await window.webContents.capturePage()).toPNG(),
+      );
+      const tabsBeforeCopy = await run(
+        `document.querySelectorAll('.tabbar .tab').length`,
+      );
+      await run(
+        `Array.from(document.querySelectorAll('.tab-menu button')).find((b) => b.innerText === '拷贝标签页').click()`,
+      );
+      await waitFor(
+        `document.querySelectorAll('.tabbar .tab').length === ${tabsBeforeCopy + 1} && !document.querySelector('.tab-menu')`,
+      );
+      assert.deepEqual(
+        await run(
+          `Array.from(document.querySelectorAll('.tabbar .tab')).map((t) => (t.querySelector('button') ?? t).innerText)`,
+        ),
+        ["连接管理", "本机测试服务器", "Terminal fixture", "Terminal fixture"],
+        "copy should be inserted after the source tab",
+      );
+      await waitFor(
+        `(() => { const active = document.querySelector('.session[style*="display: flex"]'); return !!active?.querySelector('.xterm-screen')?.textContent.includes('TERMINAL_READY'); })()`,
+      );
       sshServer.close();
       const savedImage = await window.webContents.capturePage();
       fs.writeFileSync(path.join(temp, "connections.png"), savedImage.toPNG());
       console.log(
-        `UI smoke passed: app/terminal themes, terminal find bar, focus mode, resizable/collapsible sidebar and file panel, FTP operations, local credentials/encrypted backups, SSH bulk output and background tabs. Screenshots: ${temp}`,
+        `UI smoke passed: app/terminal themes, tab context menu, terminal find bar, focus mode, resizable/collapsible sidebar and file panel, FTP operations, local credentials/encrypted backups, SSH bulk output and background tabs. Screenshots: ${temp}`,
       );
       clearTimeout(timer);
       // Exit directly: destroying the last window first triggers app.quit() on
