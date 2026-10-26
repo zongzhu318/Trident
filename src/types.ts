@@ -33,6 +33,7 @@ export type SessionEvent = {
 };
 export type Session = {
   id: string;
+  title: string;
   profile: Profile;
   credentials: Credentials;
 };

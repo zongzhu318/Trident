@@ -37,6 +37,7 @@ import SessionView from "./SessionView";
 import type { Credentials, Profile, Session } from "./types";
 import { useTheme, type ThemeMode } from "./theme";
 import { errorText } from "./errors";
+import { uniqueName } from "./naming";
 
 const api = window.trident;
 const focusShortcut = isMac ? "⌘M" : "Ctrl+Shift+M";
@@ -220,14 +221,21 @@ export default function App() {
     save: boolean,
     remember: boolean,
   ) {
-    let current = profile;
-    if (save) {
-      const saved = await api.saveProfile(profile, credentials, remember);
-      setProfiles(saved);
-      current = saved.find((p) => p.id === profile.id) ?? profile;
-    }
+    if (save)
+      setProfiles(await api.saveProfile(profile, credentials, remember));
     const id = crypto.randomUUID();
-    setSessions((items) => [...items, { id, profile: current, credentials }]);
+    setSessions((items) => [
+      ...items,
+      {
+        id,
+        title: uniqueName(
+          profile.name,
+          items.map((s) => s.title),
+        ),
+        profile,
+        credentials,
+      },
+    ]);
     setActive(id);
     setModal(null);
   }
@@ -259,6 +267,10 @@ export default function App() {
     }
     const copy: Session = {
       id: crypto.randomUUID(),
+      title: uniqueName(
+        session.title,
+        sessions.map((s) => s.title),
+      ),
       profile: session.profile,
       credentials: { ...session.credentials },
     };
@@ -288,6 +300,13 @@ export default function App() {
     if (!window.confirm(`关闭右侧 ${ids.length} 个标签页并断开连接？`)) return;
     await disconnectSessions(ids);
     if (ids.includes(active)) setActive(id);
+  }
+  async function closeAllSessions() {
+    if (!sessions.length) return;
+    if (!window.confirm(`关闭全部 ${sessions.length} 个标签页并断开连接？`))
+      return;
+    await disconnectSessions(sessions.map((s) => s.id));
+    setActive("home");
   }
   async function deleteProfile(profile: Profile) {
     if (!window.confirm(`删除连接「${profile.name}」？`)) return;
@@ -490,7 +509,7 @@ export default function App() {
                   ) : (
                     <Folder size={14} />
                   )}
-                  {s.profile.name}
+                  {s.title}
                 </button>
                 <button
                   className="tab-close"
@@ -829,6 +848,15 @@ export default function App() {
             }}
           >
             关闭右侧标签页
+          </button>
+          <button
+            role="menuitem"
+            onClick={() => {
+              setTabMenu(null);
+              void closeAllSessions().catch((e) => setError(errorText(e)));
+            }}
+          >
+            关闭所有标签页
           </button>
         </div>
       )}

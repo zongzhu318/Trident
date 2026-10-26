@@ -621,7 +621,13 @@ app.on("browser-window-created", (_event, window) => {
       const ftpMenu = await menuLabels();
       assert.deepEqual(
         ftpMenu.map((item) => item.label),
-        ["拷贝标签页", "关闭", "关闭其他标签页", "关闭右侧标签页"],
+        [
+          "拷贝标签页",
+          "关闭",
+          "关闭其他标签页",
+          "关闭右侧标签页",
+          "关闭所有标签页",
+        ],
       );
       assert.equal(ftpMenu[3].disabled, false);
       await run(
@@ -652,11 +658,58 @@ app.on("browser-window-created", (_event, window) => {
         await run(
           `Array.from(document.querySelectorAll('.tabbar .tab')).map((t) => (t.querySelector('button') ?? t).innerText)`,
         ),
-        ["连接管理", "本机测试服务器", "Terminal fixture", "Terminal fixture"],
-        "copy should be inserted after the source tab",
+        [
+          "连接管理",
+          "本机测试服务器",
+          "Terminal fixture",
+          "Terminal fixture (2)",
+        ],
+        "copy should be inserted after the source tab with a unique name",
       );
       await waitFor(
         `(() => { const active = document.querySelector('.session[style*="display: flex"]'); return !!active?.querySelector('.xterm-screen')?.textContent.includes('TERMINAL_READY'); })()`,
+      );
+      assert.equal(
+        await run(
+          `document.querySelector('.session[style*="display: flex"] .session-identity strong').textContent`,
+        ),
+        "Terminal fixture (2)",
+      );
+      // Opening the same saved connection again should receive the next suffix.
+      assert.ok(
+        await run(`(() => {
+          const item = Array.from(document.querySelectorAll('.sidebar .connection-nav')).find((n) => n.innerText.includes('Terminal fixture'));
+          if (!item) return false;
+          item.click();
+          return true;
+        })()`),
+      );
+      await waitFor(
+        `(() => { const active = document.querySelector('.session[style*="display: flex"]'); return active?.querySelector('.session-identity strong')?.textContent === 'Terminal fixture (3)' && active.querySelector('.xterm-screen')?.textContent.includes('TERMINAL_READY'); })()`,
+      );
+      assert.deepEqual(
+        await run(
+          `Array.from(document.querySelectorAll('.tabbar .tab')).map((t) => (t.querySelector('button') ?? t).innerText)`,
+        ),
+        [
+          "连接管理",
+          "本机测试服务器",
+          "Terminal fixture",
+          "Terminal fixture (2)",
+          "Terminal fixture (3)",
+        ],
+        "opening a saved connection with a duplicate name should get the next suffix",
+      );
+      // Close every tab from the context menu, confirming the renderer prompt.
+      await run(`window.confirm = () => true; undefined`);
+      assert.ok(await openTabMenu("Terminal fixture (3)"));
+      await waitFor(`!!document.querySelector('.tab-menu')`);
+      assert.equal((await menuLabels())[4].label, "关闭所有标签页");
+      await run(
+        `Array.from(document.querySelectorAll('.tab-menu button')).find((b) => b.innerText === '关闭所有标签页').click()`,
+      );
+      await waitFor(
+        `document.querySelectorAll('.tabbar .tab').length === 1 && !!document.querySelector('.home')`,
       );
       sshServer.close();
       const savedImage = await window.webContents.capturePage();

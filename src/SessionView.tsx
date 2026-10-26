@@ -419,7 +419,7 @@ const SessionView = memo(function SessionView({
           <span
             className={`status-dot ${status !== "ready" ? "inactive" : ""}`}
           />
-          <strong>{session.profile.name}</strong>
+          <strong>{session.title}</strong>
           <span className="session-address">
             {session.profile.username}@{session.profile.host}:
             {session.profile.port}
