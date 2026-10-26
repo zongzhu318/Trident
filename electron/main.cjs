@@ -15,6 +15,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const validate = require("./validation.cjs");
+const { uniqueName, uniqueNames } = require("./naming.cjs");
 const { TerminalOutput } = require("./terminal-output.cjs");
 const { createUpdater } = require("./updater.cjs");
 const { createQuitCoordinator } = require("./quit-coordinator.cjs");
@@ -436,6 +437,10 @@ function registerIPC() {
     updateConfiguration(async () => {
       if (typeof remember !== "boolean") throw new Error("保存凭据选项无效");
       const item = validate.profile(raw);
+      item.name = uniqueName(
+        item.name,
+        savedProfiles.filter((p) => p.id !== item.id).map((p) => p.name),
+      );
       const old = savedProfiles.find((p) => p.id === item.id);
       if (remember) {
         const value = relevant(item, supplied);
@@ -517,10 +522,13 @@ function registerIPC() {
     pendingImports.clear();
     const token = randomUUID();
     // Re-encrypt immediately: pending confirmations do not retain plaintext credentials.
-    const records = entries.map(({ profile, credentials }) => {
-      const item = { ...profile, id: randomUUID() };
-      return { ...item, secret: vault.seal(item, credentials) };
-    });
+    const records = uniqueNames(
+      entries.map(({ profile, credentials }) => {
+        const item = { ...profile, id: randomUUID() };
+        return { ...item, secret: vault.seal(item, credentials) };
+      }),
+      savedProfiles.map((p) => p.name),
+    );
     pendingImports.set(token, records);
     setTimeout(() => pendingImports.delete(token), 5 * 60 * 1000).unref();
     return { token, profiles: records.map(publicProfile) };
@@ -529,7 +537,13 @@ function registerIPC() {
     updateConfiguration(async () => {
       const records = pendingImports.get(token);
       if (!records) throw new Error("导入预览已过期，请重新选择备份");
-      const next = [...savedProfiles, ...records];
+      const next = [
+        ...savedProfiles,
+        ...uniqueNames(
+          records,
+          savedProfiles.map((p) => p.name),
+        ),
+      ];
       if (next.length > 1000) throw new Error("连接总数不能超过 1000");
       await persist("connections.json", next);
       savedProfiles = next;
@@ -738,10 +752,13 @@ app
     };
     nativeTheme.themeSource = preferences.theme;
     nativeTheme.on("updated", publishTheme);
-    savedProfiles = (await readJSON("connections.json", [])).map((record) => ({
+    const records = (await readJSON("connections.json", [])).map((record) => ({
       ...validate.profile(record),
       ...(typeof record.secret === "string" ? { secret: record.secret } : {}),
     }));
+    savedProfiles = uniqueNames(records);
+    if (savedProfiles.some((p, index) => p.name !== records[index].name))
+      await persist("connections.json", savedProfiles);
     knownHosts = await readJSON("known-hosts.json", {});
     registerIPC();
     updater = createUpdater({

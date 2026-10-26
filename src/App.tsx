@@ -187,10 +187,14 @@ export default function App() {
     save: boolean,
     remember: boolean,
   ) {
-    if (save)
-      setProfiles(await api.saveProfile(profile, credentials, remember));
+    let current = profile;
+    if (save) {
+      const saved = await api.saveProfile(profile, credentials, remember);
+      setProfiles(saved);
+      current = saved.find((p) => p.id === profile.id) ?? profile;
+    }
     const id = crypto.randomUUID();
-    setSessions((items) => [...items, { id, profile, credentials }]);
+    setSessions((items) => [...items, { id, profile: current, credentials }]);
     setActive(id);
     setModal(null);
   }
