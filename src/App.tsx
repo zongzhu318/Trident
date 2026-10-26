@@ -147,10 +147,15 @@ export default function App() {
         setModal({ connect: true });
       }
       if (appModifier(event) && digit) {
-        const session = sessions[Number(digit) - 1];
-        if (session) {
+        if (digit === "1") {
           event.preventDefault();
-          setActive(session.id);
+          setActive("home");
+        } else {
+          const session = sessions[Number(digit) - 2];
+          if (session) {
+            event.preventDefault();
+            setActive(session.id);
+          }
         }
       }
       if (
