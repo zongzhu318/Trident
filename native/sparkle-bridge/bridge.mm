@@ -76,6 +76,11 @@ static napi_value Start(napi_env env, napi_callback_info info) {
         napi_throw_error(env, nullptr, error.localizedDescription.UTF8String); return nullptr;
     }
     controller.updater.automaticallyDownloadsUpdates = NO;
+    // Sparkle 默认按 updateCheckInterval（约一天）调度；开启自动检查时再在启动后
+    // 立即后台检查一次，否则用户可能连续多次启动都收不到新版本提示。
+    if (controller.updater.automaticallyChecksForUpdates) {
+        [controller.updater checkForUpdatesInBackground];
+    }
     return Undefined(env);
 }
 static napi_value State(napi_env env, napi_callback_info) {
