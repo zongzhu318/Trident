@@ -14,6 +14,33 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // 中止后等待服务端关闭数据连接的控制响应，避免污染后续命令的应答队列
 const FTP_CONTROL_TIMEOUT = 1000;
 
+function modeToSymbolic(mode) {
+  if (!Number.isInteger(mode)) return "";
+  const digits = (mode & 0o777).toString(8).padStart(3, "0");
+  let result = "";
+  for (const char of digits) {
+    const bits = Number.parseInt(char, 8);
+    result += bits & 4 ? "r" : "-";
+    result += bits & 2 ? "w" : "-";
+    result += bits & 1 ? "x" : "-";
+  }
+  return result;
+}
+
+function symbolicOrEmpty(value) {
+  return typeof value === "string" && /^[rwx-]{9}$/.test(value) ? value : "";
+}
+
+function ftpPermissions(permissions) {
+  if (!permissions) return "";
+  const parts = [permissions.user, permissions.group, permissions.world];
+  if (parts.every((part) => Number.isInteger(part))) {
+    const digits = parts.map((part) => (part & 7).toString(8)).join("");
+    return modeToSymbolic(Number.parseInt(digits, 8));
+  }
+  return symbolicOrEmpty(parts.join(""));
+}
+
 function meter(report, start, total) {
   let transferred = start;
   return new Transform({
@@ -44,7 +71,7 @@ function sftpFiles(sftp) {
             modified: f.attrs.mtime,
             directory: f.attrs.isDirectory(),
             symlink: f.attrs.isSymbolicLink(),
-            permissions: (f.attrs.mode & 0o777).toString(8),
+            permissions: modeToSymbolic(f.attrs.mode),
           })),
       };
     },
@@ -180,9 +207,7 @@ function ftpFiles(client) {
             : 0,
           directory: f.isDirectory,
           symlink: f.isSymbolicLink,
-          permissions: f.permissions
-            ? `${f.permissions.user}${f.permissions.group}${f.permissions.world}`
-            : "—",
+          permissions: ftpPermissions(f.permissions),
         })),
     };
   }
@@ -342,4 +367,10 @@ function ftpFiles(client) {
     },
   };
 }
-module.exports = { sftpFiles, ftpFiles };
+module.exports = {
+  sftpFiles,
+  ftpFiles,
+  modeToSymbolic,
+  symbolicOrEmpty,
+  ftpPermissions,
+};

@@ -581,6 +581,29 @@ test(
         );
       },
     );
+    await t.test("SFTP list returns 9-digit symbolic permissions", async () => {
+      // Windows 不保留 POSIX 权限位，无法通过 chmod 构造预期 mode
+      if (process.platform === "win32") return;
+      const dir = path.join(remote, "权限");
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, "owner.txt"), "x");
+      fs.writeFileSync(path.join(dir, "readable.txt"), "x");
+      fs.writeFileSync(path.join(dir, "odd.txt"), "x");
+      fs.mkdirSync(path.join(dir, "open-dir"));
+      fs.chmodSync(path.join(dir, "owner.txt"), 0o600);
+      fs.chmodSync(path.join(dir, "readable.txt"), 0o644);
+      fs.chmodSync(path.join(dir, "odd.txt"), 0o075);
+      fs.chmodSync(path.join(dir, "open-dir"), 0o755);
+      const listing = await invoke("sftp:list", "session", "/权限");
+      const byName = Object.fromEntries(
+        listing.files.map((file) => [file.name, file]),
+      );
+      assert.equal(byName["owner.txt"].permissions, "rw-------");
+      assert.equal(byName["readable.txt"].permissions, "rw-r--r--");
+      assert.equal(byName["odd.txt"].permissions, "---rwxr-x");
+      assert.equal(byName["open-dir"].permissions, "rwxr-xr-x");
+      assert.equal(byName["open-dir"].directory, true);
+    });
     await t.test(
       "local write failures surface the reason on the failed task",
       async () => {
@@ -1742,6 +1765,14 @@ test(
         );
         const list = await invoke("sftp:list", "ftp", "/资料");
         assert.equal(list.files[0].name, "ftp-upload.txt");
+        assert.match(list.files[0].permissions, /^[rwx-]{9}$/);
+        assert.equal(list.files[0].permissions.includes("—"), false);
+        if (process.platform !== "win32") {
+          fs.chmodSync(path.join(ftpRoot, "资料/ftp-upload.txt"), 0o640);
+          const [permissionFile] = (await invoke("sftp:list", "ftp", "/资料"))
+            .files;
+          assert.equal(permissionFile.permissions, "rw-r-----");
+        }
         const tree = path.join(root, "ftp-tree");
         fs.mkdirSync(path.join(tree, "sub"), { recursive: true });
         fs.writeFileSync(path.join(tree, "a.txt"), "a");

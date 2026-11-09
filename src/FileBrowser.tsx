@@ -39,6 +39,10 @@ const sizeText = (size: number) =>
     : size < 1048576
       ? `${(size / 1024).toFixed(1)} KB`
       : `${(size / 1048576).toFixed(1)} MB`;
+const permissionText = (file: RemoteFile) =>
+  file.permissions
+    ? `${file.symlink ? "l" : file.directory ? "d" : "-"}${file.permissions}`
+    : "—";
 const durationText = (seconds: number) => {
   if (seconds < 60) return `${seconds} 秒`;
   const minutes = Math.floor(seconds / 60);
@@ -739,6 +743,7 @@ const FileBrowser = memo(function FileBrowser({
       >
         <div className="file-table-heading">
           <span>名称</span>
+          <span>权限</span>
           <span>大小</span>
         </div>
         {!enabled ? (
@@ -768,12 +773,12 @@ const FileBrowser = memo(function FileBrowser({
                 className={`file-row ${selected.has(file.name) ? "selected" : ""}`}
                 aria-selected={selected.has(file.name)}
                 aria-disabled={blocked || undefined}
-                title={`${file.name}\n权限 ${file.permissions}${file.modified ? ` · ${new Date(file.modified * 1000).toLocaleString()}` : ""}${file.symlink ? "\n符号链接不支持打开" : ""}`}
+                title={`${file.name}\n权限 ${permissionText(file)}${file.modified ? ` · ${new Date(file.modified * 1000).toLocaleString()}` : ""}${file.symlink ? "\n符号链接不支持打开" : ""}`}
                 onClick={(event) => selectFile(file, event)}
                 onDoubleClick={() => openFile(file)}
                 onKeyDown={(event) => rowKeyDown(event, file)}
               >
-                <span>
+                <span className="file-name">
                   <input
                     type="checkbox"
                     className="file-check"
@@ -795,7 +800,10 @@ const FileBrowser = memo(function FileBrowser({
                     {file.symlink ? " ↗" : ""}
                   </span>
                 </span>
-                <span>{file.directory ? "—" : sizeText(file.size)}</span>
+                <span className="file-permissions">{permissionText(file)}</span>
+                <span className="file-size">
+                  {file.directory ? "—" : sizeText(file.size)}
+                </span>
               </div>
             ))}
           </div>

@@ -127,7 +127,10 @@ module.exports = async function ftpServer(root) {
                     const stat = fs.statSync(
                       path.join(local(arg || cwd), name),
                     );
-                    return `type=${stat.isDirectory() ? "dir" : "file"};size=${stat.size};modify=20261015090000; ${name}\r\n`;
+                    const mode = (stat.mode & 0o777)
+                      .toString(8)
+                      .padStart(3, "0");
+                    return `type=${stat.isDirectory() ? "dir" : "file"};size=${stat.size};modify=20261015090000;unix.mode=${mode}; ${name}\r\n`;
                   })
                   .join("");
               if (ioDelay > 0 && Buffer.isBuffer(data) && data.length) {

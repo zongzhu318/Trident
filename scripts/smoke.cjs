@@ -206,6 +206,15 @@ app.on("browser-window-created", (_event, window) => {
         fs.readFileSync(path.join(ftpRoot, "ui-upload.txt"), "utf8"),
         "GUI 文件传输验证",
       );
+      assert.ok(
+        await run(
+          `document.querySelector('.file-table-heading')?.innerText.includes('权限')`,
+        ),
+      );
+      const filePermissions = await run(
+        `Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('ui-upload.txt'))?.querySelector('.file-permissions')?.innerText`,
+      );
+      assert.match(filePermissions, /^-[rwx-]{9}$/);
       saveDestination = path.join(temp, "ui-download.txt");
       await run(`document.querySelector('.file-row').click()`);
       await waitFor(
@@ -516,6 +525,10 @@ app.on("browser-window-created", (_event, window) => {
       await waitFor(
         `document.querySelector('.file-list')?.innerText.includes('ui-folder')`,
       );
+      const folderPermissions = await run(
+        `Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('ui-folder'))?.querySelector('.file-permissions')?.innerText`,
+      );
+      assert.match(folderPermissions, /^d[rwx-]{9}$/);
       assert.equal(
         fs.readFileSync(path.join(ftpRoot, "ui-folder/nested/n.txt"), "utf8"),
         "递归上传验证",
