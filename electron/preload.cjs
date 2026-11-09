@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 const invoke =
   (name) =>
   (...args) =>
@@ -50,7 +50,12 @@ contextBridge.exposeInMainWorld("trident", {
   resize: invoke("ssh:resize"),
   list: invoke("sftp:list"),
   upload: invoke("sftp:upload"),
+  uploadPaths: invoke("sftp:upload-paths"),
+  getPathForFile: (file) => webUtils.getPathForFile(file),
   download: invoke("sftp:download"),
+  pauseTransfer: invoke("transfer:pause"),
+  resumeTransfer: invoke("transfer:resume"),
+  cancelTransfer: invoke("transfer:cancel"),
   mkdir: invoke("sftp:mkdir"),
   rename: invoke("files:rename"),
   remove: invoke("files:remove"),

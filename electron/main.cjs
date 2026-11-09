@@ -131,6 +131,19 @@ function getSession(id) {
 function disconnect(id) {
   const session = sessions.get(id);
   if (session) {
+    const controller = session.transfer;
+    if (controller) {
+      // 断线视为失败：唤醒暂停等待器并中止当前文件，让 withFiles 释放锁
+      controller.disconnected = true;
+      controller.paused = false;
+      controller.state = "error";
+      controller.abort?.abort();
+      const wake = controller.wake;
+      controller.wake = null;
+      wake?.();
+      emitTransfer(controller, true);
+      session.transfer = null;
+    }
     session.output?.dispose();
     session.ready = false;
     sessions.delete(id);
@@ -375,26 +388,534 @@ async function withFiles(id, operation) {
     throw new Error("此连接正在进行文件操作，请等待完成");
   session.transferring = true;
   try {
-    return await operation(session.files);
+    return await operation(session.files, session);
   } finally {
     session.transferring = false;
   }
 }
-function progress(id, name, direction) {
-  let last = 0;
-  return (transferred, _chunk, total) => {
-    const now = Date.now();
-    if (now - last > 100 || transferred === total) {
-      emit(id, "transfer", {
-        name,
-        direction,
-        transferred,
-        total,
-        state: "running",
-      });
-      last = now;
-    }
+
+const MAX_TRANSFER_ENTRIES = 20000;
+const TRANSFER_INTERVAL = 100;
+const TERMINAL_STATES = new Set(["done", "error", "cancelled"]);
+
+class TransferCancelled extends Error {
+  constructor() {
+    super("传输已停止");
+    this.name = "TransferCancelled";
+  }
+}
+
+function resetSpeed(c) {
+  c.samples = [{ time: Date.now(), bytes: c.bytes.transferred }];
+}
+function sampleSpeed(c) {
+  const now = Date.now();
+  const last = c.samples.at(-1);
+  if (!last || last.time !== now)
+    c.samples.push({ time: now, bytes: c.bytes.transferred });
+  while (c.samples.length > 2 && now - c.samples[0].time > 3000)
+    c.samples.shift();
+  const first = c.samples[0];
+  const span = (now - first.time) / 1000;
+  if (span <= 0) return 0;
+  return Math.max(0, Math.round((c.bytes.transferred - first.bytes) / span));
+}
+function transferPayload(c) {
+  const terminal = TERMINAL_STATES.has(c.state);
+  return {
+    name: c.current.name,
+    direction: c.direction,
+    state: c.state,
+    transferred: c.current.transferred,
+    total: c.current.total,
+    files: { ...c.files },
+    dirs: { ...c.dirs },
+    bytes: { ...c.bytes },
+    speed: terminal || c.state === "paused" ? 0 : sampleSpeed(c),
+    discovered: c.discovered,
+    elapsed: terminal ? Math.round((Date.now() - c.startedAt) / 1000) : 0,
   };
+}
+function emitTransfer(c, force = false) {
+  const now = Date.now();
+  if (!force && now - c.lastEmit < TRANSFER_INTERVAL) return;
+  c.lastEmit = now;
+  emit(c.id, "transfer", transferPayload(c));
+}
+function createTransfer(id, session, direction) {
+  const c = {
+    id,
+    direction,
+    state: "preparing",
+    paused: false,
+    cancelled: false,
+    disconnected: false,
+    abort: null,
+    wake: null,
+    plan: [],
+    partial: [],
+    conflict: null,
+    discovered: 0,
+    startedAt: Date.now(),
+    samples: [{ time: Date.now(), bytes: 0 }],
+    lastEmit: 0,
+    current: { name: "", transferred: 0, total: 0 },
+    files: { completed: 0, total: 0, skipped: 0, failed: 0 },
+    dirs: { completed: 0, total: 0 },
+    bytes: { transferred: 0, total: 0 },
+    // 已完成与跳过条目的源字节累计，当前文件进度在此基础上叠加
+    baseBytes: 0,
+  };
+  session.transfer = c;
+  emitTransfer(c, true);
+  return c;
+}
+function initializeStats(c) {
+  const files = c.plan.filter((entry) => !entry.directory);
+  c.files.total = files.length;
+  c.bytes.total = files.reduce((sum, entry) => sum + entry.size, 0);
+  c.dirs.total = c.plan.length - files.length;
+}
+function checkCancelled(c) {
+  if (c.cancelled) throw new TransferCancelled();
+}
+async function waitForResume(c) {
+  while (c.paused && !c.cancelled) {
+    c.state = "paused";
+    emitTransfer(c, true);
+    await new Promise((resolve) => {
+      c.wake = resolve;
+    });
+    c.wake = null;
+  }
+  checkCancelled(c);
+  if (c.state === "paused") {
+    c.state = "running";
+    resetSpeed(c);
+    emitTransfer(c, true);
+  }
+}
+async function skipConflict(c, entry, detail) {
+  if (!c.conflict) {
+    // 批量传输逐文件询问不可用：首次冲突时询问一次并作用于整批
+    const { response } = await dialog.showMessageBox(window, {
+      type: "warning",
+      title: "同名文件",
+      message: `${entry.name} 已存在`,
+      detail: `${detail}「跳过所有同名文件并继续」将跳过本次传输中所有已存在的文件，不再逐个询问。`,
+      buttons: ["跳过所有同名文件并继续", "停止传输"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (response !== 0) {
+      c.cancelled = true;
+      throw new TransferCancelled();
+    }
+    c.conflict = "skip";
+  }
+  c.files.skipped += 1;
+  c.baseBytes += entry.size;
+  c.bytes.transferred = c.baseBytes;
+  c.current = { name: entry.name, transferred: entry.size, total: entry.size };
+  emitTransfer(c, true);
+}
+async function runTransfer(session, c, execute) {
+  try {
+    const result = await execute();
+    if (c.state !== "cancelled") {
+      c.paused = false;
+      c.state = "done";
+      emitTransfer(c, true);
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof TransferCancelled || c.cancelled) {
+      c.paused = false;
+      c.state = "cancelled";
+      emitTransfer(c, true);
+      return c.direction === "upload" ? c.partial : false;
+    }
+    c.paused = false;
+    c.state = "error";
+    emitTransfer(c, true);
+    throw error;
+  } finally {
+    if (session.transfer === c) session.transfer = null;
+    c.abort = null;
+    if (c.wake) {
+      const wake = c.wake;
+      c.wake = null;
+      wake();
+    }
+  }
+}
+
+async function collectUploadEntries(source, c) {
+  let stat;
+  try {
+    stat = await fs.lstat(source);
+  } catch {
+    throw new Error(`无法读取本地文件：${source}`);
+  }
+  if (stat.isSymbolicLink()) throw new Error(`不支持上传符号链接：${source}`);
+  const add = (entry) => {
+    checkCancelled(c);
+    c.plan.push(entry);
+    c.discovered = c.plan.length;
+    if (c.plan.length > MAX_TRANSFER_ENTRIES)
+      throw new Error(`单次上传不能超过 ${MAX_TRANSFER_ENTRIES} 个文件和目录`);
+    emitTransfer(c);
+  };
+  const name = validate.fileName(path.basename(source));
+  if (stat.isFile()) {
+    add({ local: source, name, size: stat.size });
+    return;
+  }
+  if (!stat.isDirectory())
+    throw new Error(`仅支持上传普通文件或文件夹：${source}`);
+  add({ local: source, name, directory: true });
+  async function walk(directory, relative) {
+    let items;
+    try {
+      items = await fs.readdir(directory, { withFileTypes: true });
+    } catch {
+      throw new Error(`无法读取本地目录：${directory}`);
+    }
+    for (const item of items) {
+      checkCancelled(c);
+      // 不跟随符号链接，避免目录环和超出用户可见范围
+      if (item.isSymbolicLink()) continue;
+      const local = path.join(directory, item.name);
+      const entry = `${relative}/${validate.fileName(item.name)}`;
+      if (item.isDirectory()) {
+        add({ local, name: entry, directory: true });
+        await walk(local, entry);
+      } else if (item.isFile()) {
+        add({ local, name: entry, size: (await fs.lstat(local)).size });
+      }
+    }
+  }
+  await walk(source, name);
+}
+
+async function runUploadFile(files, c, entry) {
+  let resumed = false;
+  for (;;) {
+    checkCancelled(c);
+    let start = 0;
+    if (resumed) {
+      const remoteSize = await files.size(entry.remote);
+      if (remoteSize != null && remoteSize >= entry.size) return;
+      if (remoteSize === 0) {
+        // 暂停时尚未写入任何字节，远端留下了空文件，重新独占创建
+        await files.remove(entry.remote).catch(() => {});
+      } else if (remoteSize != null) start = remoteSize;
+      c.current = { name: entry.name, transferred: start, total: entry.size };
+      c.bytes.transferred = c.baseBytes + start;
+      emitTransfer(c, true);
+      await waitForResume(c);
+    } else {
+      c.current = { name: entry.name, transferred: 0, total: entry.size };
+      c.bytes.transferred = c.baseBytes;
+      emitTransfer(c, true);
+    }
+    const abort = new AbortController();
+    c.abort = abort;
+    const report = (transferred, total) => {
+      c.current = {
+        name: entry.name,
+        transferred,
+        total: total || entry.size,
+      };
+      c.bytes.transferred = c.baseBytes + transferred;
+      emitTransfer(c);
+    };
+    try {
+      await files.upload(entry.local, entry.remote, report, {
+        signal: abort.signal,
+        start,
+      });
+      return;
+    } catch (error) {
+      if (c.cancelled) {
+        // 当前远程文件由本次任务独占创建，尽力删除不完整内容
+        await files.remove(entry.remote).catch(() => {});
+        throw new TransferCancelled();
+      }
+      if (c.paused) {
+        resumed = true;
+        continue;
+      }
+      throw error;
+    } finally {
+      if (c.abort === abort) c.abort = null;
+    }
+  }
+}
+
+async function uploadSources(files, target, sources, c) {
+  for (const source of sources) await collectUploadEntries(source, c);
+  for (const entry of c.plan)
+    entry.remote = validate.remotePath(path.posix.join(target, entry.name));
+  initializeStats(c);
+  await waitForResume(c);
+  c.state = "running";
+  resetSpeed(c);
+  emitTransfer(c, true);
+  for (const entry of c.plan) {
+    checkCancelled(c);
+    await waitForResume(c);
+    if (entry.directory) {
+      try {
+        await files.ensureDirectory(entry.remote);
+      } catch (error) {
+        throw new Error(`${entry.name} 目录创建失败：${error.message}`);
+      }
+      c.dirs.completed += 1;
+      emitTransfer(c);
+      continue;
+    }
+    if (await files.exists(entry.remote)) {
+      await skipConflict(c, entry, "远程目录中已存在同名文件。");
+      continue;
+    }
+    try {
+      await runUploadFile(files, c, entry);
+    } catch (error) {
+      if (error instanceof TransferCancelled) throw error;
+      c.files.failed += 1;
+      throw new Error(
+        `${entry.name} 上传失败：${error.message}；如传输已开始，远程可能保留不完整文件`,
+      );
+    }
+    c.files.completed += 1;
+    c.baseBytes += entry.size;
+    c.bytes.transferred = c.baseBytes;
+    c.current = {
+      name: entry.name,
+      transferred: entry.size,
+      total: entry.size,
+    };
+    emitTransfer(c, true);
+    c.partial.push(entry.name);
+  }
+  return c.partial;
+}
+
+function resolveLocalPath(root, relative) {
+  const base = path.resolve(root);
+  if (!relative) return base;
+  const local = path.resolve(base, ...relative.split("/"));
+  if (local !== base && !local.startsWith(base + path.sep))
+    throw new Error(`远程文件名不安全：${relative}`);
+  return local;
+}
+
+async function collectDownloadEntries(files, source, c, root) {
+  const add = (entry) => {
+    checkCancelled(c);
+    entry.local = resolveLocalPath(root, entry.relative);
+    c.plan.push(entry);
+    c.discovered = c.plan.length;
+    if (c.plan.length > MAX_TRANSFER_ENTRIES)
+      throw new Error(`单次下载不能超过 ${MAX_TRANSFER_ENTRIES} 个文件和目录`);
+    emitTransfer(c);
+  };
+  add({
+    relative: "",
+    name: validate.fileName(path.posix.basename(source)),
+    directory: true,
+    remote: source,
+  });
+  async function walk(remoteDir, relative) {
+    checkCancelled(c);
+    const listing = await files.list(remoteDir);
+    for (const item of listing.files) {
+      checkCancelled(c);
+      // 每个远程条目名必须是单一文件名，路径拼接后再校验仍在目标根目录内
+      const name = validate.fileName(item.name);
+      const child = relative ? `${relative}/${name}` : name;
+      const remote = path.posix.join(listing.path, name);
+      if (item.symlink) continue;
+      if (item.directory) {
+        add({ relative: child, name: child, directory: true, remote });
+        await walk(remote, child);
+      } else {
+        add({
+          relative: child,
+          name: child,
+          size: item.size,
+          remote,
+        });
+      }
+    }
+  }
+  await walk(source, "");
+}
+
+async function ensureLocalDirectory(local) {
+  try {
+    await fs.mkdir(local, { mode: 0o700 });
+    return;
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+  const info = await fs.lstat(local);
+  if (!info.isDirectory())
+    throw new Error(`本地已存在同名文件，无法创建目录：${local}`);
+}
+
+async function runDownloadFile(files, c, entry) {
+  let resumed = false;
+  for (;;) {
+    checkCancelled(c);
+    let start = 0;
+    if (resumed) {
+      const size = await fs
+        .stat(entry.temp)
+        .then((info) => info.size)
+        .catch(() => 0);
+      if (size >= entry.size) {
+        await fs.rename(entry.temp, entry.local);
+        return;
+      }
+      start = size;
+      c.current = { name: entry.name, transferred: start, total: entry.size };
+      c.bytes.transferred = c.baseBytes + start;
+      emitTransfer(c, true);
+      await waitForResume(c);
+    } else {
+      c.current = { name: entry.name, transferred: 0, total: entry.size };
+      c.bytes.transferred = c.baseBytes;
+      emitTransfer(c, true);
+    }
+    const abort = new AbortController();
+    c.abort = abort;
+    const report = (transferred, total) => {
+      c.current = {
+        name: entry.name,
+        transferred,
+        total: total || entry.size,
+      };
+      c.bytes.transferred = c.baseBytes + transferred;
+      emitTransfer(c);
+    };
+    try {
+      await files.download(entry.remote, entry.temp, report, {
+        signal: abort.signal,
+        start,
+      });
+      await fs.rename(entry.temp, entry.local);
+      return;
+    } catch (error) {
+      if (c.cancelled) {
+        await fs.unlink(entry.temp).catch(() => {});
+        throw new TransferCancelled();
+      }
+      if (c.paused) {
+        // 暂停保留 .part 临时文件，继续时以实际大小作为偏移
+        resumed = true;
+        continue;
+      }
+      await fs.unlink(entry.temp).catch(() => {});
+      throw error;
+    } finally {
+      if (c.abort === abort) c.abort = null;
+    }
+  }
+}
+
+async function downloadPlan(files, c) {
+  initializeStats(c);
+  await waitForResume(c);
+  c.state = "running";
+  resetSpeed(c);
+  emitTransfer(c, true);
+  for (const entry of c.plan) {
+    checkCancelled(c);
+    await waitForResume(c);
+    if (entry.directory) {
+      await ensureLocalDirectory(entry.local);
+      c.dirs.completed += 1;
+      emitTransfer(c);
+      continue;
+    }
+    if (!entry.overwrite) {
+      const exists = await fs.lstat(entry.local).then(
+        () => true,
+        (error) => (error.code === "ENOENT" ? false : Promise.reject(error)),
+      );
+      if (exists) {
+        await skipConflict(c, entry, "本地目标中已存在同名文件。");
+        continue;
+      }
+    }
+    entry.temp = `${entry.local}.${randomUUID()}.part`;
+    try {
+      await runDownloadFile(files, c, entry);
+    } catch (error) {
+      if (error instanceof TransferCancelled) throw error;
+      c.files.failed += 1;
+      throw new Error(`${entry.name} 下载失败：${error.message}`);
+    }
+    c.files.completed += 1;
+    c.baseBytes += entry.size;
+    c.bytes.transferred = c.baseBytes;
+    c.current = {
+      name: entry.name,
+      transferred: entry.size,
+      total: entry.size,
+    };
+    emitTransfer(c, true);
+  }
+}
+
+function activeTransfer(id) {
+  const c = sessions.get(id)?.transfer;
+  if (!c || TERMINAL_STATES.has(c.state)) return null;
+  return c;
+}
+function pauseTransfer(id) {
+  const c = activeTransfer(id);
+  if (!c) return false;
+  if (c.paused) return true;
+  c.paused = true;
+  if (c.state === "running") c.state = "paused";
+  c.abort?.abort();
+  const wake = c.wake;
+  c.wake = null;
+  wake?.();
+  emitTransfer(c, true);
+  return true;
+}
+function resumeTransfer(id) {
+  const c = activeTransfer(id);
+  if (!c) return false;
+  if (!c.paused) return true;
+  c.paused = false;
+  if (c.state === "paused") {
+    c.state = "running";
+    resetSpeed(c);
+  }
+  const wake = c.wake;
+  c.wake = null;
+  wake?.();
+  emitTransfer(c, true);
+  return true;
+}
+function cancelTransfer(id) {
+  const c = activeTransfer(id);
+  if (!c) return false;
+  if (c.cancelled) return true;
+  c.cancelled = true;
+  c.state = "cancelled";
+  c.abort?.abort();
+  const wake = c.wake;
+  c.wake = null;
+  wake?.();
+  emitTransfer(c, true);
+  return true;
 }
 
 function registerIPC() {
@@ -606,71 +1127,91 @@ function registerIPC() {
       return true;
     }),
   );
-  handle("sftp:upload", (id, directory) =>
-    withFiles(id, async (files) => {
+  handle("sftp:upload", (id, directory, mode = "files") =>
+    withFiles(id, async (files, session) => {
+      if (mode !== "files" && mode !== "folder")
+        throw new Error("上传方式无效");
       const target = validate.remotePath(directory);
       const choice = await dialog.showOpenDialog(window, {
-        title: "选择要上传的文件",
-        properties: ["openFile", "multiSelections"],
+        title: mode === "folder" ? "选择要上传的文件夹" : "选择要上传的文件",
+        properties:
+          mode === "folder"
+            ? ["openDirectory", "multiSelections"]
+            : ["openFile", "multiSelections"],
       });
-      if (choice.canceled) return [];
-      const completed = [];
-      for (const local of choice.filePaths) {
-        const name = validate.fileName(path.basename(local));
-        const remote = path.posix.join(target, name);
-        emit(id, "transfer", {
-          name,
-          direction: "upload",
-          transferred: 0,
-          total: 0,
-          state: "running",
-        });
-        try {
-          getSession(id);
-          await files.upload(local, remote, progress(id, name, "upload"));
-          completed.push(name);
-          emit(id, "transfer", { name, direction: "upload", state: "done" });
-        } catch (error) {
-          emit(id, "transfer", { name, direction: "upload", state: "error" });
-          throw new Error(
-            `${name} 上传失败：${error.message}；如传输已开始，远程可能保留不完整文件`,
-          );
-        }
-      }
-      return completed;
+      if (choice.canceled || !choice.filePaths?.length) return [];
+      const controller = createTransfer(id, session, "upload");
+      return runTransfer(session, controller, () =>
+        uploadSources(files, target, choice.filePaths, controller),
+      );
+    }),
+  );
+  handle("sftp:upload-paths", (id, directory, sources) =>
+    withFiles(id, (files, session) => {
+      const target = validate.remotePath(directory);
+      const paths = validate.localPaths(sources);
+      const controller = createTransfer(id, session, "upload");
+      return runTransfer(session, controller, () =>
+        uploadSources(files, target, paths, controller),
+      );
     }),
   );
   handle("sftp:download", (id, remote) =>
-    withFiles(id, async (files) => {
+    withFiles(id, async (files, session) => {
       const source = validate.remotePath(remote);
+      if (source === "/") throw new Error("不能下载根目录");
+      const details = await files.details(source);
+      if (!details) throw new Error("远程文件不存在");
+      if (details.symlink) throw new Error("符号链接不支持下载");
       const name = validate.fileName(path.posix.basename(source));
+      if (details.directory) {
+        const choice = await dialog.showOpenDialog(window, {
+          title: "选择下载到的文件夹",
+          properties: ["openDirectory", "createDirectory"],
+        });
+        if (choice.canceled || !choice.filePaths?.length) return false;
+        const root = path.join(choice.filePaths[0], name);
+        const existing = await fs.lstat(root).catch((error) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
+        if (existing && !existing.isDirectory())
+          throw new Error("本地已存在同名文件，无法下载目录");
+        const controller = createTransfer(id, session, "download");
+        return runTransfer(session, controller, async () => {
+          // 扫描完成前不创建任何本地目录，失败或停止时不留空目录
+          await collectDownloadEntries(files, source, controller, root);
+          await downloadPlan(files, controller);
+          return true;
+        });
+      }
       const choice = await dialog.showSaveDialog(window, {
         title: "下载文件",
         defaultPath: path.join(app.getPath("downloads"), name),
       });
       if (choice.canceled || !choice.filePath) return false;
-      const temp = `${choice.filePath}.${randomUUID()}.part`;
-      emit(id, "transfer", {
-        name,
-        direction: "download",
-        transferred: 0,
-        total: 0,
-        state: "running",
-      });
-      try {
-        getSession(id);
-        await fs.writeFile(temp, "", { flag: "wx", mode: 0o600 });
-        await files.download(source, temp, progress(id, name, "download"));
-        await fs.rename(temp, choice.filePath);
-        emit(id, "transfer", { name, direction: "download", state: "done" });
+      const controller = createTransfer(id, session, "download");
+      return runTransfer(session, controller, async () => {
+        controller.plan = [
+          {
+            relative: path.basename(choice.filePath),
+            // 面板显示远程文件名，本地保存名只决定写入位置
+            name,
+            local: choice.filePath,
+            remote: source,
+            size: details.size,
+            // 保存对话框已显式确认覆盖，不再走批量冲突策略
+            overwrite: true,
+          },
+        ];
+        await downloadPlan(files, controller);
         return true;
-      } catch (error) {
-        await fs.unlink(temp).catch(() => {});
-        emit(id, "transfer", { name, direction: "download", state: "error" });
-        throw error;
-      }
+      });
     }),
   );
+  handle("transfer:pause", pauseTransfer);
+  handle("transfer:resume", resumeTransfer);
+  handle("transfer:cancel", cancelTransfer);
 }
 
 function createWindow() {

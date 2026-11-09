@@ -1,6 +1,11 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { profile, remotePath, fileName } = require("../electron/validation.cjs");
+const {
+  profile,
+  remotePath,
+  fileName,
+  localPaths,
+} = require("../electron/validation.cjs");
 const valid = {
   id: "one",
   name: "Server",
@@ -55,4 +60,17 @@ test("folder names cannot escape the selected remote directory", () => {
   for (const value of ["..", ".", "../escape", "a/b", "a\\b", "bad\0name", ""])
     assert.throws(() => fileName(value));
   assert.equal(fileName("项目 files"), "项目 files");
+});
+test("upload sources must be a bounded list of absolute local paths", () => {
+  assert.deepEqual(localPaths(["/tmp/a", "/tmp/b"]), ["/tmp/a", "/tmp/b"]);
+  for (const value of [
+    [],
+    "relative",
+    null,
+    ["relative"],
+    ["/tmp/a\0b"],
+    [`/${"a".repeat(5000)}`],
+  ])
+    assert.throws(() => localPaths(value));
+  assert.throws(() => localPaths(new Array(257).fill("/tmp/a")));
 });

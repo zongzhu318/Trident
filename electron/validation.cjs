@@ -69,4 +69,23 @@ function fileName(value) {
   return value;
 }
 
-module.exports = { profile, remotePath, fileName };
+function localPath(value) {
+  if (
+    typeof value !== "string" ||
+    !path.isAbsolute(value) ||
+    value.length > 4096 ||
+    value.includes("\0")
+  ) {
+    throw new Error("本地路径无效");
+  }
+  return value;
+}
+
+function localPaths(value) {
+  if (!Array.isArray(value) || !value.length || value.length > 256) {
+    throw new Error("上传来源无效");
+  }
+  return value.map(localPath);
+}
+
+module.exports = { profile, remotePath, fileName, localPaths };

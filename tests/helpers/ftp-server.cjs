@@ -5,6 +5,8 @@ const { once } = require("node:events");
 module.exports = async function ftpServer(root) {
   const connections = new Set(),
     dataServers = new Set();
+  // 测试用节流：让大文件传输可持续足够久以便中途暂停
+  let ioDelay = 0;
   const server = net.createServer((socket) => {
     connections.add(socket);
     socket.on("close", () => connections.delete(socket));
@@ -15,6 +17,7 @@ module.exports = async function ftpServer(root) {
       cwd = "/",
       renameFrom,
       dataReady,
+      restart = 0,
       authenticated = false;
     const local = (name) => path.join(root, path.posix.resolve(cwd, name));
     async function command(line) {
@@ -64,19 +67,39 @@ module.exports = async function ftpServer(root) {
             `229 Entering Extended Passive Mode (|||${dataServer.address().port}|)`,
           );
         }
-        if (["MLSD", "LIST", "RETR", "STOR"].includes(cmd)) {
+        if (cmd === "REST") {
+          restart = Number.parseInt(arg, 10) || 0;
+          return send(`350 Restarting at ${restart}`);
+        }
+        if (["MLSD", "LIST", "RETR", "STOR", "APPE"].includes(cmd)) {
           send("150 Opening data connection");
           const stream = await dataReady;
-          if (cmd === "STOR") {
-            const chunks = [];
-            stream.on("data", (chunk) => chunks.push(chunk));
-            await once(stream, "end");
-            fs.writeFileSync(local(arg), Buffer.concat(chunks));
+          if (cmd === "STOR" || cmd === "APPE") {
+            // 边收边写，暂停中止时保留已写入部分，便于 APPE 续传
+            const fd = fs.openSync(local(arg), cmd === "APPE" ? "a" : "w");
+            try {
+              if (ioDelay > 0)
+                stream.on("data", (chunk) => {
+                  fs.writeSync(fd, chunk);
+                  stream.pause();
+                  setTimeout(() => stream.resume(), ioDelay);
+                });
+              else stream.on("data", (chunk) => fs.writeSync(fd, chunk));
+              // 正常结束或被客户端中止时都会触发 close
+              await once(stream, "close");
+            } finally {
+              fs.closeSync(fd);
+            }
             stream.end();
           } else {
             let data;
-            if (cmd === "RETR") data = fs.readFileSync(local(arg));
-            else
+            if (cmd === "RETR") {
+              data = fs.readFileSync(local(arg));
+              if (restart > 0) {
+                data = data.subarray(restart);
+                restart = 0;
+              }
+            } else
               data = fs
                 .readdirSync(local(arg || cwd))
                 .map((name) => {
@@ -84,7 +107,20 @@ module.exports = async function ftpServer(root) {
                   return `type=${stat.isDirectory() ? "dir" : "file"};size=${stat.size};modify=20261015090000; ${name}\r\n`;
                 })
                 .join("");
-            stream.end(data);
+            if (ioDelay > 0 && Buffer.isBuffer(data) && data.length) {
+              let offset = 0;
+              const push = () => {
+                if (stream.destroyed) return;
+                if (offset >= data.length) {
+                  stream.end();
+                  return;
+                }
+                stream.write(data.subarray(offset, offset + 32768));
+                offset += 32768;
+                setTimeout(push, ioDelay);
+              };
+              push();
+            } else stream.end(data);
             await once(stream, "close");
           }
           return send("226 Transfer complete");
@@ -131,6 +167,9 @@ module.exports = async function ftpServer(root) {
   await once(server, "listening");
   return {
     port: server.address().port,
+    setIoDelay(ms) {
+      ioDelay = ms;
+    },
     close() {
       for (const socket of connections) socket.destroy();
       for (const ds of dataServers) ds.close();

@@ -374,14 +374,14 @@ const SessionView = memo(function SessionView({
       if (event.type === "close") {
         setStatus("closed");
         setFilesReady(false);
-        if (pendingTransfer.current?.state === "running")
+        const active = (state?: Transfer["state"]) =>
+          state === "preparing" || state === "running" || state === "paused";
+        if (active(pendingTransfer.current?.state))
           pendingTransfer.current = {
-            ...pendingTransfer.current,
+            ...pendingTransfer.current!,
             state: "error",
           };
-        setTransfer((t) =>
-          t?.state === "running" ? { ...t, state: "error" } : t,
-        );
+        setTransfer((t) => (active(t?.state) ? { ...t!, state: "error" } : t));
       }
       if (event.type === "error" || event.type === "notice")
         setError(event.data);

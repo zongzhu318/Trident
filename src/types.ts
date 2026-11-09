@@ -19,12 +19,25 @@ export type RemoteFile = {
   symlink: boolean;
   permissions: string;
 };
+export type TransferState =
+  | "preparing"
+  | "running"
+  | "paused"
+  | "done"
+  | "error"
+  | "cancelled";
 export type Transfer = {
   name: string;
   direction: "upload" | "download";
+  state: TransferState;
   transferred?: number;
   total?: number;
-  state: "running" | "done" | "error";
+  files?: { completed: number; total: number; skipped: number; failed: number };
+  dirs?: { completed: number; total: number };
+  bytes?: { transferred: number; total: number };
+  speed?: number;
+  discovered?: number;
+  elapsed?: number;
 };
 export type SessionEvent = {
   id: string;
@@ -79,8 +92,21 @@ declare global {
         id: string,
         path: string | null,
       ): Promise<{ path: string; files: RemoteFile[] }>;
-      upload(id: string, path: string): Promise<string[]>;
+      upload(
+        id: string,
+        path: string,
+        mode?: "files" | "folder",
+      ): Promise<string[]>;
+      uploadPaths(
+        id: string,
+        path: string,
+        sources: string[],
+      ): Promise<string[]>;
+      getPathForFile(file: File): string;
       download(id: string, path: string): Promise<boolean>;
+      pauseTransfer(id: string): Promise<boolean>;
+      resumeTransfer(id: string): Promise<boolean>;
+      cancelTransfer(id: string): Promise<boolean>;
       mkdir(id: string, path: string, name: string): Promise<void>;
       rename(id: string, path: string, name: string): Promise<void>;
       remove(id: string, path: string): Promise<boolean>;

@@ -205,10 +205,10 @@ app.on("browser-window-created", (_event, window) => {
       saveDestination = path.join(temp, "ui-download.txt");
       await run(`document.querySelector('.file-row').click()`);
       await waitFor(
-        `!document.querySelector('button[title="下载选中文件"]').disabled`,
+        `!document.querySelector('button[title="下载选中的文件或文件夹"]').disabled`,
       );
       await run(
-        `document.querySelector('button[title="下载选中文件"]').click()`,
+        `document.querySelector('button[title="下载选中的文件或文件夹"]').click()`,
       );
       await waitFor(
         `document.querySelector('.transfer-item')?.innerText.includes('↓ ui-upload.txt') && document.querySelector('.transfer-item')?.innerText.includes('已完成')`,
@@ -247,6 +247,20 @@ app.on("browser-window-created", (_event, window) => {
       );
       await waitFor(`document.querySelectorAll('.file-row').length === 0`);
       assert.equal(fs.existsSync(path.join(ftpRoot, "renamed.txt")), false);
+      const folder = path.join(temp, "ui-folder");
+      fs.mkdirSync(path.join(folder, "nested"), { recursive: true });
+      fs.writeFileSync(path.join(folder, "nested", "n.txt"), "递归上传验证");
+      openFiles = [folder];
+      await run(
+        `document.querySelector('button[title="上传文件夹（含子目录）"]').click()`,
+      );
+      await waitFor(
+        `document.querySelector('.file-list')?.innerText.includes('ui-folder')`,
+      );
+      assert.equal(
+        fs.readFileSync(path.join(ftpRoot, "ui-folder/nested/n.txt"), "utf8"),
+        "递归上传验证",
+      );
       ftpServer.close();
       sshServer = await startTerminal();
       await run(`document.querySelector('.tab-add').click()`);

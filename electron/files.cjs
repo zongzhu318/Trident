@@ -1,5 +1,5 @@
 const fs = require("node:fs/promises");
-const { createReadStream } = require("node:fs");
+const { createReadStream, createWriteStream } = require("node:fs");
 const { Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const path = require("node:path");
@@ -10,6 +10,20 @@ const call = (sftp, method, ...args) =>
       error ? reject(error) : resolve(value),
     ),
   );
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// 中止后等待服务端关闭数据连接的控制响应，避免污染后续命令的应答队列
+const FTP_CONTROL_TIMEOUT = 1000;
+
+function meter(report, start, total) {
+  let transferred = start;
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      transferred += chunk.length;
+      report(transferred, total);
+      callback(null, chunk);
+    },
+  });
+}
 
 function sftpFiles(sftp) {
   return {
@@ -35,6 +49,47 @@ function sftpFiles(sftp) {
       };
     },
     mkdir: (target) => call(sftp, "mkdir", target),
+    async details(target) {
+      try {
+        const attrs = await call(sftp, "lstat", target);
+        return {
+          directory: attrs.isDirectory(),
+          symlink: attrs.isSymbolicLink(),
+          size: attrs.size,
+        };
+      } catch (error) {
+        if (error.code === 2) return null;
+        throw error;
+      }
+    },
+    async exists(target) {
+      try {
+        await call(sftp, "lstat", target);
+        return true;
+      } catch (error) {
+        if (error.code === 2) return false;
+        throw error;
+      }
+    },
+    async size(target) {
+      try {
+        return (await call(sftp, "lstat", target)).size;
+      } catch (error) {
+        if (error.code === 2) return null;
+        throw error;
+      }
+    },
+    async ensureDirectory(target) {
+      try {
+        const attrs = await call(sftp, "stat", target);
+        if (!attrs.isDirectory())
+          throw new Error("远程已存在同名文件，无法创建目录");
+        return;
+      } catch (error) {
+        if (error.code !== 2) throw error;
+      }
+      await call(sftp, "mkdir", target);
+    },
     async rename(source, target) {
       try {
         await call(sftp, "lstat", target);
@@ -52,24 +107,35 @@ function sftpFiles(sftp) {
         target,
       );
     },
-    async upload(local, remote, report) {
+    async upload(local, remote, report, { signal, start = 0 } = {}) {
       const { size } = await fs.stat(local);
-      let transferred = 0;
-      const meter = new Transform({
-        transform(chunk, _encoding, callback) {
-          transferred += chunk.length;
-          report(transferred, chunk.length, size);
-          callback(null, chunk);
-        },
-      });
+      report(start, size);
+      const destination =
+        start > 0
+          ? sftp.createWriteStream(remote, {
+              flags: "r+",
+              start,
+              mode: 0o600,
+            })
+          : sftp.createWriteStream(remote, { flags: "wx", mode: 0o600 });
       await pipeline(
-        createReadStream(local),
-        meter,
-        sftp.createWriteStream(remote, { flags: "wx", mode: 0o600 }),
+        createReadStream(local, start > 0 ? { start } : undefined),
+        meter(report, start, size),
+        destination,
+        { signal },
       );
     },
-    download: (remote, local, report) =>
-      call(sftp, "fastGet", remote, local, { step: report }),
+    async download(remote, local, report, { signal, start = 0 } = {}) {
+      const { size } = await call(sftp, "lstat", remote);
+      report(start, size);
+      await pipeline(
+        sftp.createReadStream(remote, start > 0 ? { start } : undefined),
+        meter(report, start, size),
+        // 临时文件名由本次任务随机生成，追加写入即可从偏移续传
+        createWriteStream(local, { flags: "a", mode: 0o600 }),
+        { signal },
+      );
+    },
   };
 }
 
@@ -98,46 +164,148 @@ function ftpFiles(client) {
         })),
     };
   }
-  async function exists(target) {
-    return (await list(path.posix.dirname(target))).files.some(
+  async function find(target) {
+    return (await list(path.posix.dirname(target))).files.find(
       (f) => f.name === path.posix.basename(target),
     );
   }
+  async function exists(target) {
+    return Boolean(await find(target));
+  }
   return {
     list,
+    exists,
+    async details(target) {
+      const item = await find(target);
+      if (!item) return null;
+      return {
+        directory: item.directory && !item.symlink,
+        symlink: item.symlink,
+        size: item.size,
+      };
+    },
+    async size(target) {
+      try {
+        return await client.size(target);
+      } catch {
+        return null;
+      }
+    },
     mkdir: (target) => client.send(`MKD ${target}`),
+    async ensureDirectory(target) {
+      const item = await find(target);
+      if (item) {
+        if (!item.directory)
+          throw new Error("远程已存在同名文件，无法创建目录");
+        return;
+      }
+      await client.send(`MKD ${target}`);
+    },
     async rename(source, target) {
       if (await exists(target))
         throw new Error("目标名称已存在，请使用其他名称");
       return client.rename(source, target);
     },
     async remove(target) {
-      const item = (await list(path.posix.dirname(target))).files.find(
-        (f) => f.name === path.posix.basename(target),
-      );
+      const item = await find(target);
       if (!item) throw new Error("文件已不存在");
       // RMD only removes empty directories; never recursively deletes contents.
       return item.directory && !item.symlink
         ? client.send(`RMD ${target}`)
         : client.remove(target);
     },
-    async upload(local, remote, report) {
-      if (await exists(remote)) throw new Error("目标文件已存在，未上传");
+    async upload(local, remote, report, { signal, start = 0 } = {}) {
+      if (signal?.aborted) throw new Error("传输已中止");
       const { size } = await fs.stat(local);
-      client.trackProgress((info) => report(info.bytes, 0, size));
+      report(start, size);
+      const source = createReadStream(local, start > 0 ? { start } : undefined);
+      let aborted = false;
+      // 主动销毁源流会让 basic-ftp 关闭整条控制连接；改为正常结束数据流
+      const onAbort = () => {
+        aborted = true;
+        source.push(null);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      client.trackProgress((info) => report(start + info.bytes, size));
       try {
-        await client.uploadFrom(local, remote);
+        // APPE 续写已存在的部分文件；首次上传仍由控制器先做同名检查
+        if (start > 0) await client.appendFrom(source, remote);
+        else await client.uploadFrom(source, remote);
+        if (aborted) throw new Error("传输已中止");
       } finally {
+        signal?.removeEventListener("abort", onAbort);
         client.trackProgress();
+        source.destroy();
       }
     },
-    async download(remote, local, report) {
+    async download(remote, local, report, { signal, start = 0 } = {}) {
+      if (signal?.aborted) throw new Error("传输已中止");
       const size = await client.size(remote).catch(() => 0);
-      client.trackProgress((info) => report(info.bytes, 0, size));
+      report(start, size);
+      const ftp = client.ftp;
+      await client.prepareTransfer(ftp);
+      const socket = ftp.dataSocket;
+      if (!socket) throw new Error("无法建立 FTP 数据连接");
+      const destination = createWriteStream(local, {
+        flags: "a",
+        mode: 0o600,
+      });
+      let received = 0;
+      const meter = new Transform({
+        transform(chunk, _encoding, callback) {
+          received += chunk.length;
+          report(start + received, size);
+          callback(null, chunk);
+        },
+      });
+      let abortError = null;
+      let rejectAbort;
+      const aborted = new Promise((_resolve, reject) => {
+        rejectAbort = reject;
+      });
+      aborted.catch(() => {});
+      const onAbort = () => {
+        abortError = new Error("传输已中止");
+        // 先销毁本端已停止的数据连接和写入流，避免基础库把中止升级为连接错误
+        socket.destroy();
+        destination.destroy();
+        rejectAbort(abortError);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      let control;
       try {
-        await client.downloadTo(local, remote);
+        if (start > 0) await ftp.request(`REST ${start}`);
+        if (abortError) throw abortError;
+        control = new Promise((resolve, reject) => {
+          ftp.handle(`RETR ${remote}`, (res, task) => {
+            if (res instanceof Error) {
+              task.reject(res);
+              reject(res);
+            } else if (res.code >= 200 && res.code < 300) {
+              task.resolve(res);
+              resolve();
+            }
+          });
+        });
+        const data = pipeline(socket, meter, destination);
+        control.catch(() => {});
+        data.catch(() => {});
+        await Promise.race([Promise.all([control, data]), aborted]);
+      } catch (error) {
+        if (abortError) {
+          // 等控制连接收下中止后的响应再交还会话，续传时才能安全发送下一条命令
+          if (control)
+            await Promise.race([
+              control.catch(() => {}),
+              delay(FTP_CONTROL_TIMEOUT),
+            ]);
+          throw abortError;
+        }
+        throw error;
       } finally {
-        client.trackProgress();
+        signal?.removeEventListener("abort", onAbort);
+        destination.destroy();
+        socket.destroy();
       }
     },
   };
