@@ -104,6 +104,7 @@ declare global {
       ): Promise<string[]>;
       getPathForFile(file: File): string;
       download(id: string, path: string): Promise<boolean>;
+      downloadPaths(id: string, paths: string[]): Promise<boolean>;
       pauseTransfer(id: string, taskId: string): Promise<boolean>;
       resumeTransfer(id: string, taskId: string): Promise<boolean>;
       cancelTransfer(id: string, taskId: string): Promise<boolean>;

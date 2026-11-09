@@ -69,6 +69,12 @@ function fileName(value) {
   return value;
 }
 
+function remotePaths(value, max = 20000) {
+  if (!Array.isArray(value) || !value.length || value.length > max)
+    throw new Error("下载来源无效");
+  return [...new Set(value.map(remotePath))];
+}
+
 function localPath(value) {
   if (
     typeof value !== "string" ||
@@ -88,4 +94,10 @@ function localPaths(value) {
   return value.map(localPath);
 }
 
-module.exports = { profile, remotePath, fileName, localPaths };
+module.exports = {
+  profile,
+  remotePath,
+  remotePaths,
+  fileName,
+  localPaths,
+};

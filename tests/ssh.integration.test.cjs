@@ -284,6 +284,7 @@ test(
     const events = [];
     let hostResponse = 1;
     let hostPrompts = 0;
+    let openPrompts = 0;
     let chooseFiles = [];
     let destination;
     let instance;
@@ -340,10 +341,13 @@ test(
           hostPrompts++;
           return { response: hostResponse };
         },
-        showOpenDialog: async () => ({
-          canceled: false,
-          filePaths: chooseFiles,
-        }),
+        showOpenDialog: async () => {
+          openPrompts++;
+          return {
+            canceled: false,
+            filePaths: chooseFiles,
+          };
+        },
         showSaveDialog: async () => ({
           canceled: false,
           filePath: destination,
@@ -761,6 +765,310 @@ test(
       },
     );
     await t.test(
+      "batch download transfers mixed files and directories into one target folder",
+      async () => {
+        const dir = path.join(remote, "批量");
+        fs.mkdirSync(path.join(dir, "bundle", "nested"), { recursive: true });
+        fs.mkdirSync(path.join(dir, "empty"));
+        fs.writeFileSync(path.join(dir, "one.txt"), "one");
+        fs.writeFileSync(path.join(dir, "bundle", "two.txt"), "two");
+        fs.writeFileSync(
+          path.join(dir, "bundle", "nested", "three.txt"),
+          "three",
+        );
+        const target = fs.mkdtempSync(path.join(root, "batch-"));
+        fs.mkdirSync(path.join(target, "bundle"));
+        fs.writeFileSync(path.join(target, "bundle", "keep.txt"), "keep");
+        events.length = 0;
+        openPrompts = 0;
+        chooseFiles = [target];
+        assert.equal(
+          await invoke("sftp:download-paths", "session", [
+            "/批量/one.txt",
+            "/批量/one.txt",
+            "/批量/bundle",
+            "/批量/empty",
+          ]),
+          true,
+        );
+        assert.equal(openPrompts, 1, "批量下载只应弹出一次目标文件夹对话框");
+        assert.equal(
+          fs.readFileSync(path.join(target, "one.txt"), "utf8"),
+          "one",
+        );
+        assert.equal(
+          fs.readFileSync(path.join(target, "bundle/two.txt"), "utf8"),
+          "two",
+        );
+        assert.equal(
+          fs.readFileSync(path.join(target, "bundle/nested/three.txt"), "utf8"),
+          "three",
+        );
+        assert.equal(
+          fs.readFileSync(path.join(target, "bundle/keep.txt"), "utf8"),
+          "keep",
+          "目标文件夹中已有的目录应合并复用",
+        );
+        assert.ok(fs.statSync(path.join(target, "empty")).isDirectory());
+        const done = transferEvents().find((event) => event.state === "done");
+        assert.equal(done.name, "one.txt 等 3 项");
+        assert.deepEqual(done.files, {
+          completed: 3,
+          total: 3,
+          skipped: 0,
+          failed: 0,
+        });
+        assert.deepEqual(done.dirs, { completed: 3, total: 3 });
+        assert.equal(done.bytes.transferred, 11);
+        assert.equal(
+          new Set(transferEvents().map((event) => event.taskId)).size,
+          1,
+          "整批下载应只创建一个传输任务",
+        );
+        assert.equal(
+          fs
+            .readdirSync(target, { recursive: true })
+            .some((name) => String(name).endsWith(".part")),
+          false,
+        );
+      },
+    );
+    await t.test(
+      "batch download rejects unsafe selections and honors conflict choices",
+      async () => {
+        const dir = path.join(remote, "批量冲突");
+        fs.mkdirSync(dir);
+        fs.writeFileSync(path.join(dir, "a.txt"), "new-a");
+        fs.writeFileSync(path.join(dir, "b.txt"), "new-b");
+        const target = fs.mkdtempSync(path.join(root, "batch-conflict-"));
+        fs.writeFileSync(path.join(target, "a.txt"), "old-a");
+
+        // 输入校验：空列表、跨父目录、根目录、符号链接与不存在的条目
+        openPrompts = 0;
+        await assert.rejects(
+          invoke("sftp:download-paths", "session", []),
+          /下载来源/,
+        );
+        await assert.rejects(
+          invoke("sftp:download-paths", "session", [
+            "/批量冲突/a.txt",
+            "/批量冲突/b.txt/child",
+          ]),
+          /同一目录/,
+        );
+        await assert.rejects(
+          invoke("sftp:download-paths", "session", ["/"]),
+          /根目录/,
+        );
+        await assert.rejects(
+          invoke("sftp:download-paths", "session", ["/批量冲突/不存在.txt"]),
+          /不存在/,
+        );
+        await assert.rejects(
+          invoke("sftp:download-paths", "session", ["/批量冲突/bad\\name.txt"]),
+          /文件名/,
+        );
+        const link = path.join(remote, "批量链接");
+        fs.symlinkSync(path.join(dir, "a.txt"), link);
+        await assert.rejects(
+          invoke("sftp:download-paths", "session", ["/批量链接"]),
+          /符号链接/,
+        );
+        assert.equal(openPrompts, 0, "校验失败时不得打开对话框");
+
+        // 跳过所有同名文件：已有内容保持，其余文件继续
+        hostResponse = 0;
+        events.length = 0;
+        openPrompts = 0;
+        chooseFiles = [target];
+        assert.equal(
+          await invoke("sftp:download-paths", "session", [
+            "/批量冲突/a.txt",
+            "/批量冲突/b.txt",
+          ]),
+          true,
+        );
+        assert.equal(openPrompts, 1);
+        const skipped = transferEvents().find(
+          (event) => event.state === "done",
+        );
+        assert.equal(skipped.files.skipped, 1);
+        assert.equal(skipped.files.completed, 1);
+        assert.equal(
+          fs.readFileSync(path.join(target, "a.txt"), "utf8"),
+          "old-a",
+        );
+        assert.equal(
+          fs.readFileSync(path.join(target, "b.txt"), "utf8"),
+          "new-b",
+        );
+
+        // 选择停止：任务取消，已有文件不变
+        hostResponse = 1;
+        events.length = 0;
+        fs.rmSync(path.join(target, "b.txt"));
+        assert.equal(
+          await invoke("sftp:download-paths", "session", [
+            "/批量冲突/a.txt",
+            "/批量冲突/b.txt",
+          ]),
+          false,
+        );
+        assert.ok(
+          transferEvents().some((event) => event.state === "cancelled"),
+        );
+        assert.equal(
+          fs.readFileSync(path.join(target, "a.txt"), "utf8"),
+          "old-a",
+        );
+        assert.equal(fs.existsSync(path.join(target, "b.txt")), false);
+
+        // 递归扫描遇到路径穿越名称时在写入前中止
+        fs.mkdirSync(path.join(remote, "批量恶意"));
+        fs.writeFileSync(path.join(remote, "批量恶意/ok.txt"), "ok");
+        malicious = { dir: "/批量恶意", name: "../escape-batch.txt" };
+        const escaped = fs.mkdtempSync(path.join(root, "batch-escape-"));
+        events.length = 0;
+        chooseFiles = [escaped];
+        await assert.rejects(
+          invoke("sftp:download-paths", "session", ["/批量恶意"]),
+          /文件名/,
+        );
+        malicious = null;
+        assert.equal(
+          fs.existsSync(path.join(escaped, "escape-batch.txt")),
+          false,
+        );
+        assert.equal(fs.existsSync(path.join(escaped, "批量恶意")), false);
+        assert.equal(transferEvents().at(-1).state, "error");
+
+        // 超过 20000 条上限时在扫描阶段中止，不产生部分下载
+        const overflow = path.join(remote, "批量上限");
+        fs.mkdirSync(overflow);
+        for (let section = 0; section < 199; section++) {
+          const sub = path.join(overflow, `s${section}`);
+          fs.mkdirSync(sub);
+          for (let file = 0; file < 100; file++)
+            fs.writeFileSync(path.join(sub, `f${file}.txt`), "");
+        }
+        const limited = fs.mkdtempSync(path.join(root, "batch-limit-"));
+        events.length = 0;
+        chooseFiles = [limited];
+        await assert.rejects(
+          invoke("sftp:download-paths", "session", ["/批量上限"]),
+          /20000/,
+        );
+        assert.deepEqual(fs.readdirSync(limited), []);
+        assert.match(transferEvents().at(-1).error, /20000/);
+      },
+    );
+    await t.test(
+      "batch download pauses, resumes and stops independently of other transfers",
+      async () => {
+        const dir = path.join(remote, "批量控制");
+        fs.mkdirSync(dir);
+        const dataA = Buffer.alloc(2 * 1024 * 1024, 0x41);
+        const dataB = Buffer.alloc(2 * 1024 * 1024, 0x42);
+        fs.writeFileSync(path.join(dir, "batch-a.bin"), dataA);
+        fs.writeFileSync(path.join(dir, "batch-b.bin"), dataB);
+        const target = fs.mkdtempSync(path.join(root, "batch-control-"));
+        chooseFiles = [target];
+        events.length = 0;
+        ioDelay = 3;
+        try {
+          const batch = invoke("sftp:download-paths", "session", [
+            "/批量控制/batch-a.bin",
+            "/批量控制/batch-b.bin",
+          ]);
+          await waitFor(() =>
+            transferEvents().some(
+              (event) =>
+                event.state === "running" &&
+                event.name === "batch-a.bin 等 2 项" &&
+                event.transferred > 0,
+            ),
+          );
+          const taskId = transferEvents().find(
+            (event) => event.name === "batch-a.bin 等 2 项",
+          ).taskId;
+
+          // 批量任务暂停时，同会话的其他下载继续并完成
+          destination = path.join(root, "batch-other.bin");
+          const other = invoke(
+            "sftp:download",
+            "session",
+            "/批量控制/batch-b.bin",
+          );
+          assert.equal(await invoke("transfer:pause", "session", taskId), true);
+          await waitFor(() =>
+            transferEvents().some(
+              (event) => event.taskId === taskId && event.state === "paused",
+            ),
+          );
+          assert.equal(await other, true);
+          assert.equal(
+            fs.readFileSync(destination).equals(dataB),
+            true,
+            "暂停批量任务不应影响其他下载",
+          );
+          assert.ok(
+            transferEvents().some(
+              (event) => event.taskId === taskId && event.state === "paused",
+            ),
+            "其他任务完成后批量任务仍保持暂停",
+          );
+
+          assert.equal(
+            await invoke("transfer:resume", "session", taskId),
+            true,
+          );
+          assert.equal(await batch, true);
+          assert.equal(
+            fs.readFileSync(path.join(target, "batch-a.bin")).equals(dataA),
+            true,
+          );
+          assert.equal(
+            fs.readFileSync(path.join(target, "batch-b.bin")).equals(dataB),
+            true,
+          );
+
+          // 停止批量任务会清理未完成临时文件
+          const cancelTarget = fs.mkdtempSync(path.join(root, "batch-cancel-"));
+          chooseFiles = [cancelTarget];
+          events.length = 0;
+          const running = invoke("sftp:download-paths", "session", [
+            "/批量控制/batch-a.bin",
+            "/批量控制/batch-b.bin",
+          ]);
+          await waitFor(() =>
+            transferEvents().some(
+              (event) => event.state === "running" && event.transferred > 0,
+            ),
+          );
+          const cancelId = transferEvents().find(
+            (event) => event.state === "running",
+          ).taskId;
+          assert.equal(
+            await invoke("transfer:cancel", "session", cancelId),
+            true,
+          );
+          assert.equal(await running, false);
+          await waitFor(() =>
+            transferEvents().some(
+              (event) =>
+                event.taskId === cancelId && event.state === "cancelled",
+            ),
+          );
+          assert.equal(
+            fs.readdirSync(cancelTarget).some((name) => name.endsWith(".part")),
+            false,
+          );
+        } finally {
+          ioDelay = 0;
+        }
+      },
+    );
+    await t.test(
       "upload pause resumes from the remote offset and cancel removes the partial file",
       async () => {
         await invoke("sftp:mkdir", "session", "/", "暂停");
@@ -1093,7 +1401,10 @@ test(
         chooseFiles = [parent];
         events.length = 0;
         failListOnce = "/扫描重试";
-        assert.equal(await invoke("sftp:download", "session", "/扫描重试"), true);
+        assert.equal(
+          await invoke("sftp:download", "session", "/扫描重试"),
+          true,
+        );
         assert.equal(failListOnce, null, "fault should have been triggered");
         assert.equal(
           fs.readFileSync(path.join(parent, "扫描重试/a.txt"), "utf8"),

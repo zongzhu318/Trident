@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const {
   profile,
   remotePath,
+  remotePaths,
   fileName,
   localPaths,
 } = require("../electron/validation.cjs");
@@ -73,4 +74,13 @@ test("upload sources must be a bounded list of absolute local paths", () => {
   ])
     assert.throws(() => localPaths(value));
   assert.throws(() => localPaths(new Array(257).fill("/tmp/a")));
+});
+test("download sources are deduplicated and bounded", () => {
+  assert.deepEqual(remotePaths(["/tmp/a", "/tmp/a", "/tmp/b/../c"]), [
+    "/tmp/a",
+    "/tmp/c",
+  ]);
+  for (const value of [[], "relative", null, ["relative"], ["/bad\0path"]])
+    assert.throws(() => remotePaths(value));
+  assert.throws(() => remotePaths(new Array(20001).fill("/tmp/a")));
 });

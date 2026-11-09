@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld("trident", {
   uploadPaths: invoke("sftp:upload-paths"),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   download: invoke("sftp:download"),
+  downloadPaths: invoke("sftp:download-paths"),
   pauseTransfer: invoke("transfer:pause"),
   resumeTransfer: invoke("transfer:resume"),
   cancelTransfer: invoke("transfer:cancel"),

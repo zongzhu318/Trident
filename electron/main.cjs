@@ -787,8 +787,7 @@ async function runTransfer(session, c, execute) {
     }
     return result;
   } catch (error) {
-    const failure =
-      error instanceof Error ? error : new Error(String(error));
+    const failure = error instanceof Error ? error : new Error(String(error));
     if (c.disconnected) {
       c.paused = false;
       c.error ??= new Error("连接已断开");
@@ -1247,7 +1246,7 @@ function resolveLocalPath(root, relative) {
   return local;
 }
 
-async function collectDownloadEntries(files, source, c, root) {
+async function collectDownloadEntries(files, sources, c, root) {
   const add = (entry) => {
     checkCancelled(c);
     entry.local = resolveLocalPath(root, entry.relative);
@@ -1257,12 +1256,6 @@ async function collectDownloadEntries(files, source, c, root) {
       throw new Error(`单次下载不能超过 ${MAX_TRANSFER_ENTRIES} 个文件和目录`);
     emitTransfer(c);
   };
-  add({
-    relative: "",
-    name: validate.fileName(path.posix.basename(source)),
-    directory: true,
-    remote: source,
-  });
   async function walk(remoteDir, relative) {
     checkCancelled(c);
     const listing = await retrySftp(c, () => files.list(remoteDir));
@@ -1286,7 +1279,22 @@ async function collectDownloadEntries(files, source, c, root) {
       }
     }
   }
-  await walk(source, "");
+  // 每个顶层来源以自身名称作为目标根目录下的相对路径起点
+  for (const source of sources) {
+    checkCancelled(c);
+    const name = validate.fileName(path.posix.basename(source.remote));
+    if (source.directory) {
+      add({ relative: name, name, directory: true, remote: source.remote });
+      await walk(source.remote, name);
+    } else {
+      add({
+        relative: name,
+        name,
+        size: source.size ?? 0,
+        remote: source.remote,
+      });
+    }
+  }
 }
 
 async function ensureLocalDirectory(local) {
@@ -1705,6 +1713,52 @@ function registerIPC() {
       );
     }),
   );
+  handle("sftp:download-paths", (id, paths) =>
+    withFiles(id, async (files, session) => {
+      const sources = validate.remotePaths(paths);
+      const parent = path.posix.dirname(sources[0]);
+      for (const source of sources) {
+        if (source === "/") throw new Error("不能下载根目录");
+        if (path.posix.dirname(source) !== parent)
+          throw new Error("批量下载只能选择同一目录下的条目");
+      }
+      // FTP 主连接同一时刻只能执行一条控制命令，顺序读取顶层条目元数据
+      const entries = sources.map((source) => ({
+        remote: source,
+        name: validate.fileName(path.posix.basename(source)),
+      }));
+      for (const entry of entries) {
+        const details = await files.details(entry.remote);
+        if (!details) throw new Error("远程文件不存在");
+        if (details.symlink) throw new Error("符号链接不支持下载");
+        entry.directory = details.directory;
+        entry.size = details.size;
+      }
+      const choice = await withDialog(() =>
+        dialog.showOpenDialog(window, {
+          title: "选择批量下载到的文件夹",
+          properties: ["openDirectory", "createDirectory"],
+        }),
+      );
+      if (choice.canceled || !choice.filePaths?.length) return false;
+      const controller = createTransfer(
+        id,
+        session,
+        "download",
+        transferTitle(entries.map((entry) => entry.name)),
+      );
+      return runTransfer(session, controller, async () => {
+        await collectDownloadEntries(
+          files,
+          entries,
+          controller,
+          choice.filePaths[0],
+        );
+        await downloadPlan(files, controller, session);
+        return true;
+      });
+    }),
+  );
   handle("sftp:download", (id, remote) =>
     withFiles(id, async (files, session) => {
       const source = validate.remotePath(remote);
@@ -1721,17 +1775,24 @@ function registerIPC() {
           }),
         );
         if (choice.canceled || !choice.filePaths?.length) return false;
-        const root = path.join(choice.filePaths[0], name);
-        const existing = await fs.lstat(root).catch((error) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
-        });
+        const root = choice.filePaths[0];
+        const existing = await fs
+          .lstat(path.join(root, name))
+          .catch((error) => {
+            if (error.code === "ENOENT") return null;
+            throw error;
+          });
         if (existing && !existing.isDirectory())
           throw new Error("本地已存在同名文件，无法下载目录");
         const controller = createTransfer(id, session, "download", name);
         return runTransfer(session, controller, async () => {
           // 扫描完成前不创建任何本地目录，失败或停止时不留空目录
-          await collectDownloadEntries(files, source, controller, root);
+          await collectDownloadEntries(
+            files,
+            [{ remote: source, directory: true }],
+            controller,
+            root,
+          );
           await downloadPlan(files, controller, session);
           return true;
         });

@@ -13,11 +13,15 @@ let openFiles = [saveDestination];
 let ftpServer;
 let sshServer;
 // Exercise the app's real IPC and local credential storage, with deterministic native file choices.
+let openPrompts = 0;
 dialog.showSaveDialog = async () => ({
   canceled: false,
   filePath: saveDestination,
 });
-dialog.showOpenDialog = async () => ({ canceled: false, filePaths: openFiles });
+dialog.showOpenDialog = async () => {
+  openPrompts++;
+  return { canceled: false, filePaths: openFiles };
+};
 dialog.showMessageBox = async () => ({ response: 1 });
 const timer = setTimeout(() => {
   console.error("UI smoke test timed out");
@@ -248,7 +252,7 @@ app.on("browser-window-created", (_event, window) => {
       await waitFor(`document.querySelectorAll('.file-row').length === 0`);
       assert.equal(fs.existsSync(path.join(ftpRoot, "renamed.txt")), false);
       // Two downloads run as independent tasks and the file panel stays usable.
-      const bigFiles = ["big-a.bin", "big-b.bin"].map((name) => {
+      const bigFiles = ["big-a.bin", "big-b.bin", "big-c.bin"].map((name) => {
         const target = path.join(ftpRoot, name);
         fs.writeFileSync(target, Buffer.alloc(2 * 1024 * 1024, name));
         return target;
@@ -267,7 +271,7 @@ app.on("browser-window-created", (_event, window) => {
         `Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-a.bin')).click()`,
       );
       await waitFor(
-        `!!Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-a.bin') && r.getAttribute('aria-pressed') === 'true')`,
+        `!!Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-a.bin') && r.getAttribute('aria-selected') === 'true')`,
       );
       await run(
         `document.querySelector('button[title="下载选中的文件或文件夹"]').click()`,
@@ -278,7 +282,7 @@ app.on("browser-window-created", (_event, window) => {
         `Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-b.bin')).click()`,
       );
       await waitFor(
-        `!!Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-b.bin') && r.getAttribute('aria-pressed') === 'true')`,
+        `!!Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-b.bin') && r.getAttribute('aria-selected') === 'true')`,
       );
       await run(
         `document.querySelector('button[title="下载选中的文件或文件夹"]').click()`,
@@ -323,6 +327,153 @@ app.on("browser-window-created", (_event, window) => {
           true,
         );
       ftpServer.setIoDelay(0);
+      // Multi-select: plain click, shift range, ctrl toggle, select all and batch download.
+      await run(
+        `document.querySelector('.file-toolbar button[title="刷新"]').click()`,
+      );
+      await waitFor(
+        `document.querySelectorAll('.file-row').length === 3 && !document.querySelector('.file-toolbar .spin')`,
+      );
+      const rowState = (name) =>
+        `Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('${name}'))?.getAttribute('aria-selected') === 'true'`;
+      assert.equal(
+        await run(
+          `document.querySelector('button[title="下载选中的文件或文件夹"]').disabled`,
+        ),
+        true,
+        "未选择时下载入口应禁用",
+      );
+      await run(
+        `Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-a.bin')).click()`,
+      );
+      await waitFor(rowState("big-a.bin"));
+      assert.deepEqual(
+        await run(`({
+          download: document.querySelector('button[title="下载选中的文件或文件夹"]').disabled,
+          rename: document.querySelector('button[title="重命名"]').disabled,
+          remove: document.querySelector('button[title="删除文件或空目录"]').disabled,
+          count: document.querySelector('.file-selected-count')?.innerText,
+        })`),
+        {
+          download: false,
+          rename: false,
+          remove: false,
+          count: "已选 1 项",
+        },
+      );
+      // Shift 选择连续区间
+      await run(`(() => {
+        const row = Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-c.bin'));
+        row.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+      })()`);
+      await waitFor(`(() => {
+        const rows = Array.from(document.querySelectorAll('.file-row'));
+        return ['big-a.bin', 'big-b.bin', 'big-c.bin'].every((name) => rows.find((r) => r.innerText.includes(name))?.getAttribute('aria-selected') === 'true');
+      })()`);
+      // Cmd/Ctrl 切换单项
+      await run(`(() => {
+        const row = Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-b.bin'));
+        row.dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true, ctrlKey: true }));
+      })()`);
+      await waitFor(`!(${rowState("big-b.bin")})`);
+      assert.equal(await run(rowState("big-a.bin")), true);
+      // 复选框必须位于文件图标之上，否则真实鼠标点击会被透明图标拦截
+      assert.equal(
+        await run(`(() => {
+          const row = Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-b.bin'));
+          const box = row.querySelector('input[type="checkbox"]');
+          const rect = box.getBoundingClientRect();
+          return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) === box;
+        })()`),
+        true,
+        "复选框应可被鼠标直接点中",
+      );
+      // 复选框切换
+      await run(`(() => {
+        const row = Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-b.bin'));
+        row.querySelector('input[type="checkbox"]').click();
+      })()`);
+      await waitFor(rowState("big-b.bin"));
+      // 键盘空格切换
+      await run(`(() => {
+        const row = Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-b.bin'));
+        row.querySelector('input[type="checkbox"]').click();
+        row.focus();
+        row.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+      })()`);
+      await waitFor(rowState("big-b.bin"));
+      // 全选与取消全选（键盘切换后三项均已选中）
+      await run(
+        `Array.from(document.querySelectorAll('.file-actions button')).find((b) => b.innerText === '取消全选').click()`,
+      );
+      await waitFor(
+        `Array.from(document.querySelectorAll('.file-row')).every((r) => r.getAttribute('aria-selected') === 'false')`,
+      );
+      await run(
+        `Array.from(document.querySelectorAll('.file-actions button')).find((b) => b.innerText === '全选').click()`,
+      );
+      await waitFor(
+        `Array.from(document.querySelectorAll('.file-row')).every((r) => r.getAttribute('aria-selected') === 'true')`,
+      );
+      await run(
+        `Array.from(document.querySelectorAll('.file-actions button')).find((b) => b.innerText === '取消全选').click()`,
+      );
+      await waitFor(
+        `Array.from(document.querySelectorAll('.file-row')).every((r) => r.getAttribute('aria-selected') === 'false')`,
+      );
+      // 批量下载两个文件只弹出一次目标文件夹对话框并只创建一个任务
+      await run(
+        `Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-a.bin')).click()`,
+      );
+      await run(`(() => {
+        const row = Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-b.bin'));
+        row.dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true, ctrlKey: true }));
+      })()`);
+      await waitFor(`(${rowState("big-a.bin")}) && (${rowState("big-b.bin")})`);
+      const batchTarget = path.join(temp, "batch-target");
+      fs.mkdirSync(batchTarget);
+      openFiles = [batchTarget];
+      openPrompts = 0;
+      const batchItem = `Array.from(document.querySelectorAll('.transfer-item')).find((n) => n.innerText.includes('big-a.bin 等 2 项'))`;
+      await run(
+        `document.querySelector('button[title="下载选中的文件或文件夹"]').click()`,
+      );
+      await waitFor(`!!${batchItem}`);
+      await waitFor(
+        `${batchItem}?.querySelector('.transfer-final')?.innerText.includes('已完成')`,
+      );
+      assert.equal(openPrompts, 1, "批量下载只应弹出一个目标文件夹对话框");
+      assert.equal(
+        await run(
+          `Array.from(document.querySelectorAll('.transfer-name')).filter((n) => n.innerText.includes('big-a.bin 等 2 项')).length`,
+        ),
+        1,
+        "整批下载只应创建一个任务",
+      );
+      for (const name of ["big-a.bin", "big-b.bin"])
+        assert.equal(
+          fs
+            .readFileSync(path.join(batchTarget, name))
+            .equals(fs.readFileSync(path.join(ftpRoot, name))),
+          true,
+          `${name} 应完整写入批量目标文件夹`,
+        );
+      // Double-click still downloads a single file through the save dialog.
+      saveDestination = path.join(temp, "big-c.out");
+      await run(`(() => {
+        const row = Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-c.bin'));
+        row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      })()`);
+      await waitFor(
+        `${bigItem("big-c.bin")}?.querySelector('.transfer-final')?.innerText.includes('已完成')`,
+      );
+      assert.equal(
+        fs
+          .readFileSync(saveDestination)
+          .equals(fs.readFileSync(path.join(ftpRoot, "big-c.bin"))),
+        true,
+        "双击普通文件仍应下载到保存对话框选择的位置",
+      );
       fs.writeFileSync(
         path.join(temp, "transfer-tasks.png"),
         (await window.webContents.capturePage()).toPNG(),
@@ -341,7 +492,9 @@ app.on("browser-window-created", (_event, window) => {
         `${failedItem}?.querySelector('.transfer-error')?.innerText`,
       );
       assert.match(failureText, /big-a\.bin 下载失败/);
-      await run(`${failedItem}?.querySelector('.transfer-final button').click()`);
+      await run(
+        `${failedItem}?.querySelector('.transfer-final button').click()`,
+      );
       await waitFor(`!${failedItem}`);
       const folder = path.join(temp, "ui-folder");
       fs.mkdirSync(path.join(folder, "nested"), { recursive: true });

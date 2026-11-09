@@ -265,7 +265,8 @@ const FileBrowser = memo(function FileBrowser({
   const [error, setError] = useState("");
   const [hidden, setHidden] = useState(false);
   const [dropActive, setDropActive] = useState(false);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const selectionAnchor = useRef<string | null>(null);
   const dragDepth = useRef(0);
   const [edit, setEdit] = useState<{
     type: "mkdir" | "rename";
@@ -291,7 +292,8 @@ const FileBrowser = memo(function FileBrowser({
     setDirectory(result.path);
     setPathInput(result.path);
     setFiles(result.files);
-    setSelected(null);
+    setSelected(new Set());
+    selectionAnchor.current = null;
     if (listHost.current) listHost.current.scrollTop = 0;
     setScrollTop(0);
   }
@@ -338,9 +340,90 @@ const FileBrowser = memo(function FileBrowser({
     start + Math.ceil(viewportHeight / 40) + 14,
   );
   const renderedFiles = virtual ? visibleFiles.slice(start, end) : visibleFiles;
-  const item = visibleFiles.find((f) => f.name === selected);
+  const selectedFiles = visibleFiles.filter((file) => selected.has(file.name));
+  const item = selectedFiles.length === 1 ? selectedFiles[0] : undefined;
+  const selectableFiles = visibleFiles.filter((file) => !file.symlink);
+  const allSelected =
+    selectableFiles.length > 0 &&
+    selectableFiles.every((file) => selected.has(file.name));
   const blocked = busy || !enabled || !directory;
   const canDrop = enabled && !blocked;
+  function toggleFile(file: RemoteFile) {
+    if (blocked || file.symlink) return;
+    setSelected((previous) => {
+      const next = new Set(previous);
+      if (next.has(file.name)) next.delete(file.name);
+      else next.add(file.name);
+      return next;
+    });
+    selectionAnchor.current = file.name;
+  }
+  function selectFile(
+    file: RemoteFile,
+    event: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean },
+  ) {
+    if (blocked || file.symlink) return;
+    if (event.shiftKey && selectionAnchor.current) {
+      const from = visibleFiles.findIndex(
+        (item) => item.name === selectionAnchor.current,
+      );
+      const to = visibleFiles.findIndex((item) => item.name === file.name);
+      if (from >= 0 && to >= 0) {
+        const [first, last] = from <= to ? [from, to] : [to, from];
+        const range = visibleFiles
+          .slice(first, last + 1)
+          .filter((item) => !item.symlink)
+          .map((item) => item.name);
+        setSelected((previous) => new Set([...previous, ...range]));
+        return;
+      }
+    }
+    if (event.metaKey || event.ctrlKey) {
+      toggleFile(file);
+      return;
+    }
+    setSelected(new Set([file.name]));
+    selectionAnchor.current = file.name;
+  }
+  function toggleAll() {
+    if (blocked || !selectableFiles.length) return;
+    setSelected(
+      allSelected
+        ? new Set()
+        : new Set(selectableFiles.map((file) => file.name)),
+    );
+    selectionAnchor.current = null;
+  }
+  function toggleHidden(next: boolean) {
+    setHidden(next);
+    if (next) return;
+    const visible = new Set(
+      files.filter((file) => !file.name.startsWith(".")).map((f) => f.name),
+    );
+    setSelected(
+      (previous) => new Set([...previous].filter((name) => visible.has(name))),
+    );
+  }
+  function openFile(file: RemoteFile) {
+    if (file.symlink) return;
+    if (file.directory) {
+      setEdit(null);
+      void perform(() => refresh(join(directory, file.name)));
+    } else void download(file);
+  }
+  function rowKeyDown(
+    event: ReactKeyboardEvent<HTMLDivElement>,
+    file: RemoteFile,
+  ) {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === " ") {
+      event.preventDefault();
+      toggleFile(file);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      openFile(file);
+    }
+  }
   const fileDrag = (event: ReactDragEvent<HTMLElement>) =>
     Array.from(event.dataTransfer.types).includes("Files");
   function dragEnter(event: ReactDragEvent<HTMLElement>) {
@@ -389,6 +472,18 @@ const FileBrowser = memo(function FileBrowser({
   }
   const download = (file: RemoteFile) =>
     startTransfer(() => api.download(id, join(directory, file.name)));
+  function downloadSelected() {
+    if (blocked) return;
+    const filesToDownload = selectedFiles.filter((file) => !file.symlink);
+    if (filesToDownload.length === 1) download(filesToDownload[0]);
+    else if (filesToDownload.length > 1)
+      startTransfer(() =>
+        api.downloadPaths(
+          id,
+          filesToDownload.map((file) => join(directory, file.name)),
+        ),
+      );
+  }
   const uploadAndRefresh = (mode: "files" | "folder") => {
     const target = directory;
     startTransfer(async () => {
@@ -540,10 +635,23 @@ const FileBrowser = memo(function FileBrowser({
           <FolderPlus size={16} />
         </button>
         <button
+          className="secondary small"
+          disabled={blocked || !selectableFiles.length}
+          title={allSelected ? "取消全选" : "全选可见条目"}
+          onClick={toggleAll}
+        >
+          {allSelected ? "取消全选" : "全选"}
+        </button>
+        {selectedFiles.length > 0 && (
+          <span className="file-selected-count">
+            已选 {selectedFiles.length} 项
+          </span>
+        )}
+        <button
           className="icon-button"
-          disabled={blocked || !item || item.symlink}
+          disabled={blocked || !selectedFiles.length}
           title="下载选中的文件或文件夹"
-          onClick={() => item && void download(item)}
+          onClick={downloadSelected}
         >
           <Download size={16} />
         </button>
@@ -576,7 +684,7 @@ const FileBrowser = memo(function FileBrowser({
           <input
             type="checkbox"
             checked={hidden}
-            onChange={(e) => setHidden(e.target.checked)}
+            onChange={(e) => toggleHidden(e.target.checked)}
           />
           隐藏文件
         </label>
@@ -645,31 +753,42 @@ const FileBrowser = memo(function FileBrowser({
           </div>
         ) : (
           <div
+            role="listbox"
+            aria-multiselectable="true"
+            aria-label="远程文件"
             className={virtual ? "virtual-file-space" : undefined}
             style={virtual ? { height: visibleFiles.length * 40 } : undefined}
           >
             {renderedFiles.map((file, index) => (
-              <button
+              <div
                 key={file.name}
+                role="option"
+                tabIndex={blocked ? -1 : 0}
                 style={virtual ? { top: (start + index) * 40 } : undefined}
-                disabled={blocked}
-                className={`file-row ${selected === file.name ? "selected" : ""}`}
-                aria-pressed={selected === file.name}
+                className={`file-row ${selected.has(file.name) ? "selected" : ""}`}
+                aria-selected={selected.has(file.name)}
+                aria-disabled={blocked || undefined}
                 title={`${file.name}\n权限 ${file.permissions}${file.modified ? ` · ${new Date(file.modified * 1000).toLocaleString()}` : ""}${file.symlink ? "\n符号链接不支持打开" : ""}`}
-                onClick={() => setSelected(file.name)}
-                onDoubleClick={() => {
-                  if (file.symlink) return;
-                  if (file.directory) {
-                    setEdit(null);
-                    void perform(() => refresh(join(directory, file.name)));
-                  } else void download(file);
-                }}
+                onClick={(event) => selectFile(file, event)}
+                onDoubleClick={() => openFile(file)}
+                onKeyDown={(event) => rowKeyDown(event, file)}
               >
                 <span>
+                  <input
+                    type="checkbox"
+                    className="file-check"
+                    tabIndex={-1}
+                    checked={selected.has(file.name)}
+                    disabled={blocked || file.symlink}
+                    aria-label={`选择 ${file.name}`}
+                    onClick={(event) => event.stopPropagation()}
+                    onDoubleClick={(event) => event.stopPropagation()}
+                    onChange={() => toggleFile(file)}
+                  />
                   {file.directory ? (
-                    <Folder className="folder-icon" size={16} />
+                    <Folder className="folder-icon file-type-icon" size={16} />
                   ) : (
-                    <File size={15} />
+                    <File className="file-type-icon" size={15} />
                   )}
                   <span>
                     {file.name}
@@ -677,7 +796,7 @@ const FileBrowser = memo(function FileBrowser({
                   </span>
                 </span>
                 <span>{file.directory ? "—" : sizeText(file.size)}</span>
-              </button>
+              </div>
             ))}
           </div>
         )}
