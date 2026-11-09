@@ -48,6 +48,8 @@ test(
     let failReadOnce = null;
     // 注入一次性 OPENDIR 失败：验证目录扫描也会退避重试
     let failListOnce = null;
+    // 注入指定前缀的 OPEN 失败：跨平台模拟远程写入失败
+    let failOpenPrefix = null;
     // SFTP 并发代理：同时打开的文件句柄数
     let openSftpFiles = 0;
     let maxSftpFiles = 0;
@@ -162,6 +164,10 @@ test(
             );
             sftp.on("OPEN", (id, p, flags, attributes) =>
               safe(id, () => {
+                if (failOpenPrefix && p.startsWith(failOpenPrefix)) {
+                  sftp.status(id, 4);
+                  return;
+                }
                 const fd = fs.openSync(
                   localPath(p),
                   utils.sftp.flagsToString(flags),
@@ -1473,7 +1479,8 @@ test(
         );
         hostResponse = 1;
 
-        // 目标目录只读：文件写入失败后整批终止，只记录一个失败
+        // 远程写入失败：文件写入失败后整批终止，只记录一个失败
+        // 用服务端 OPEN 失败注入，避免依赖 Windows 上不生效的只读目录权限
         const failSource = path.join(root, "sftp-fail");
         fs.mkdirSync(failSource);
         for (const name of ["a", "b", "c", "d"])
@@ -1481,7 +1488,7 @@ test(
         await invoke("sftp:mkdir", "session", "/", "失败并发");
         const failTarget = path.join(remote, "失败并发/sftp-fail");
         fs.mkdirSync(failTarget);
-        fs.chmodSync(failTarget, 0o500);
+        failOpenPrefix = "/失败并发/sftp-fail/";
         events.length = 0;
         try {
           await assert.rejects(
@@ -1489,7 +1496,7 @@ test(
             /上传失败/,
           );
         } finally {
-          fs.chmodSync(failTarget, 0o700);
+          failOpenPrefix = null;
         }
         const failed = transferEvents().at(-1);
         assert.equal(failed.state, "error");
