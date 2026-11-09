@@ -247,12 +247,118 @@ app.on("browser-window-created", (_event, window) => {
       );
       await waitFor(`document.querySelectorAll('.file-row').length === 0`);
       assert.equal(fs.existsSync(path.join(ftpRoot, "renamed.txt")), false);
+      // Two downloads run as independent tasks and the file panel stays usable.
+      const bigFiles = ["big-a.bin", "big-b.bin"].map((name) => {
+        const target = path.join(ftpRoot, name);
+        fs.writeFileSync(target, Buffer.alloc(2 * 1024 * 1024, name));
+        return target;
+      });
+      ftpServer.setIoDelay(30);
+      await run(
+        `document.querySelector('.file-toolbar button[title="刷新"]').click()`,
+      );
+      await waitFor(
+        `document.querySelector('.file-list')?.innerText.includes('big-a.bin') && document.querySelector('.file-list')?.innerText.includes('big-b.bin')`,
+      );
+      saveDestination = path.join(temp, "big-a.out");
+      const bigItem = (name) =>
+        `Array.from(document.querySelectorAll('.transfer-item')).find((n) => n.innerText.includes('${name}'))`;
+      await run(
+        `Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-a.bin')).click()`,
+      );
+      await waitFor(
+        `!!Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-a.bin') && r.getAttribute('aria-pressed') === 'true')`,
+      );
+      await run(
+        `document.querySelector('button[title="下载选中的文件或文件夹"]').click()`,
+      );
+      await waitFor(`!!${bigItem("big-a.bin")}`);
+      saveDestination = path.join(temp, "big-b.out");
+      await run(
+        `Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-b.bin')).click()`,
+      );
+      await waitFor(
+        `!!Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-b.bin') && r.getAttribute('aria-pressed') === 'true')`,
+      );
+      await run(
+        `document.querySelector('button[title="下载选中的文件或文件夹"]').click()`,
+      );
+      await waitFor(`!!${bigItem("big-a.bin")} && !!${bigItem("big-b.bin")}`);
+      const parallel = await run(`({
+        running: ['big-a.bin', 'big-b.bin'].filter((name) => Array.from(document.querySelectorAll('.transfer-item')).find((n) => n.innerText.includes(name))?.querySelector('.transfer-controls')).length,
+        upload: document.querySelector('button[title="上传文件夹（含子目录）"]').disabled,
+        mkdir: document.querySelector('button[title="新建文件夹"]').disabled,
+        rename: document.querySelector('button[title="重命名"]').disabled,
+        remove: document.querySelector('button[title="删除文件或空目录"]').disabled,
+        download: document.querySelector('button[title="下载选中的文件或文件夹"]').disabled,
+      })`);
+      assert.equal(
+        parallel.running,
+        2,
+        "both download tasks should be running",
+      );
+      assert.equal(parallel.upload, false);
+      assert.equal(parallel.mkdir, false);
+      assert.equal(parallel.rename, false);
+      assert.equal(parallel.remove, false);
+      assert.equal(parallel.download, false);
+      for (
+        let count = 0;
+        count < 40 && ftpServer.stats().maxTransfers < 2;
+        count++
+      )
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.ok(
+        ftpServer.stats().maxTransfers >= 2,
+        "downloads should use separate FTP connections",
+      );
+      await waitFor(
+        `${bigItem("big-a.bin")}?.querySelector('.transfer-final')?.innerText.includes('已完成') && ${bigItem("big-b.bin")}?.querySelector('.transfer-final')?.innerText.includes('已完成')`,
+      );
+      for (const [index, output] of ["big-a.out", "big-b.out"].entries())
+        assert.equal(
+          fs
+            .readFileSync(path.join(temp, output))
+            .equals(fs.readFileSync(bigFiles[index])),
+          true,
+        );
+      ftpServer.setIoDelay(0);
+      fs.writeFileSync(
+        path.join(temp, "transfer-tasks.png"),
+        (await window.webContents.capturePage()).toPNG(),
+      );
+      // A failed task must explain itself in the task list, not only in the banner.
+      saveDestination = path.join(temp, "missing-dir", "big-a.out");
+      const failedItem = `Array.from(document.querySelectorAll('.transfer-item')).find((n) => n.querySelector('.transfer-error'))`;
+      await run(
+        `Array.from(document.querySelectorAll('.file-row')).find((r) => r.innerText.includes('big-a.bin')).click()`,
+      );
+      await run(
+        `document.querySelector('button[title="下载选中的文件或文件夹"]').click()`,
+      );
+      await waitFor(`!!${failedItem}`);
+      const failureText = await run(
+        `${failedItem}?.querySelector('.transfer-error')?.innerText`,
+      );
+      assert.match(failureText, /big-a\.bin 下载失败/);
+      await run(`${failedItem}?.querySelector('.transfer-final button').click()`);
+      await waitFor(`!${failedItem}`);
       const folder = path.join(temp, "ui-folder");
       fs.mkdirSync(path.join(folder, "nested"), { recursive: true });
       fs.writeFileSync(path.join(folder, "nested", "n.txt"), "递归上传验证");
       openFiles = [folder];
       await run(
         `document.querySelector('button[title="上传文件夹（含子目录）"]').click()`,
+      );
+      await waitFor(
+        `Array.from(document.querySelectorAll('.transfer-name')).some((n) => n.innerText.includes('ui-folder'))`,
+      );
+      assert.equal(
+        await run(
+          `Array.from(document.querySelectorAll('.transfer-name')).some((n) => n.innerText.includes('nested/n.txt'))`,
+        ),
+        false,
+        "任务标题应保持文件夹名，而不是当前文件",
       );
       await waitFor(
         `document.querySelector('.file-list')?.innerText.includes('ui-folder')`,

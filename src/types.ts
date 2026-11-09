@@ -22,7 +22,9 @@ export type RemoteFile = {
 export type TransferState =
   "preparing" | "running" | "paused" | "done" | "error" | "cancelled";
 export type Transfer = {
+  taskId: string;
   name: string;
+  file?: string;
   direction: "upload" | "download";
   state: TransferState;
   transferred?: number;
@@ -35,6 +37,7 @@ export type Transfer = {
   eta?: number | null;
   discovered?: number;
   elapsed?: number;
+  error?: string | null;
 };
 export type SessionEvent = {
   id: string;
@@ -101,9 +104,9 @@ declare global {
       ): Promise<string[]>;
       getPathForFile(file: File): string;
       download(id: string, path: string): Promise<boolean>;
-      pauseTransfer(id: string): Promise<boolean>;
-      resumeTransfer(id: string): Promise<boolean>;
-      cancelTransfer(id: string): Promise<boolean>;
+      pauseTransfer(id: string, taskId: string): Promise<boolean>;
+      resumeTransfer(id: string, taskId: string): Promise<boolean>;
+      cancelTransfer(id: string, taskId: string): Promise<boolean>;
       mkdir(id: string, path: string, name: string): Promise<void>;
       rename(id: string, path: string, name: string): Promise<void>;
       remove(id: string, path: string): Promise<boolean>;

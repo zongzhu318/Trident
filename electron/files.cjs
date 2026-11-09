@@ -273,6 +273,11 @@ function ftpFiles(client) {
         flags: "a",
         mode: 0o600,
       });
+      // 本地写入失败（目录被删除、磁盘已满）时先无错关闭数据连接：
+      // 否则 pipeline 会把本地错误传播到数据 socket，basic-ftp 会因此关闭整条控制连接
+      destination.once("error", () => {
+        if (ftp.dataSocket === socket) ftp.dataSocket = undefined;
+      });
       let received = 0;
       const meter = new Transform({
         transform(chunk, _encoding, callback) {
@@ -300,15 +305,19 @@ function ftpFiles(client) {
         if (start > 0) await ftp.request(`REST ${start}`);
         if (abortError) throw abortError;
         control = new Promise((resolve, reject) => {
-          ftp.handle(`RETR ${remote}`, (res, task) => {
-            if (res instanceof Error) {
-              task.reject(res);
-              reject(res);
-            } else if (res.code >= 200 && res.code < 300) {
-              task.resolve(res);
-              resolve();
-            }
-          });
+          // handle 返回的 Promise 在拒绝时要单独捕获：它只由回调中的 task 结算，
+          // 我们不使用其返回值，但它与 control 同时拒绝
+          ftp
+            .handle(`RETR ${remote}`, (res, task) => {
+              if (res instanceof Error) {
+                task.reject(res);
+                reject(res);
+              } else if (res.code >= 200 && res.code < 300) {
+                task.resolve(res);
+                resolve();
+              }
+            })
+            .catch(() => {});
         });
         const data = pipeline(socket, meter, destination);
         control.catch(() => {});

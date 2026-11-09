@@ -1445,6 +1445,17 @@ body.resizing * {
 .transfer-panel {
   border-top: 1px solid var(--border);
   min-height: 116px;
+  max-height: 45%;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+}
+.transfer-list {
+  overflow-y: auto;
+  min-height: 0;
+}
+.transfer-item + .transfer-item {
+  border-top: 1px solid var(--border);
 }
 .transfer-empty {
   padding: 26px 16px;
@@ -1485,13 +1496,28 @@ body.resizing * {
   font-size: 9px;
   color: var(--subtle);
 }
+.transfer-file {
+  color: var(--fg);
+}
 .transfer-parallel {
   color: var(--accent-muted);
+}
+.transfer-final {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 .transfer-summary {
   font-size: 9px;
   color: var(--subtle);
   line-height: 1.5;
+}
+.transfer-error {
+  font-size: 9px;
+  color: var(--danger);
+  line-height: 1.5;
+  word-break: break-word;
 }
 .transfer-controls {
   display: flex;

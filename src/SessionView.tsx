@@ -26,6 +26,11 @@ import {
 } from "./terminal-themes";
 import { errorText } from "./errors";
 const api = window.trident;
+const TERMINAL_TRANSFER_STATES = new Set<Transfer["state"]>([
+  "done",
+  "error",
+  "cancelled",
+]);
 const findDecorations = {
   matchBackground: "#f2c14e55",
   matchBorder: "#f2c14e88",
@@ -322,13 +327,17 @@ const SessionView = memo(function SessionView({
   const [savingTheme, setSavingTheme] = useState(false);
   const filesToggle = useRef<HTMLButtonElement>(null);
   const [error, setError] = useState("");
-  const [transfer, setTransfer] = useState<Transfer | null>(null);
+  const [transfers, setTransfers] = useState<Transfer[]>([]);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
-  const pendingTransfer = useRef<Transfer | null>(null);
+  const transferMap = useRef(new Map<string, Transfer>());
   const { terminalTheme } = useTheme();
+  const publishTransfers = () => {
+    // 后台标签只更新引用，重新可见时再一次性渲染，避免无谓重绘
+    if (visibleRef.current) setTransfers([...transferMap.current.values()]);
+  };
   useEffect(() => {
-    if (visible) setTransfer(pendingTransfer.current);
+    if (visible) setTransfers([...transferMap.current.values()]);
   }, [visible]);
   const hasTerminal = session.profile.protocol === "ssh";
   useEffect(() => {
@@ -374,20 +383,28 @@ const SessionView = memo(function SessionView({
       if (event.type === "close") {
         setStatus("closed");
         setFilesReady(false);
-        const active = (state?: Transfer["state"]) =>
-          state === "preparing" || state === "running" || state === "paused";
-        if (active(pendingTransfer.current?.state))
-          pendingTransfer.current = {
-            ...pendingTransfer.current!,
-            state: "error",
-          };
-        setTransfer((t) => (active(t?.state) ? { ...t!, state: "error" } : t));
+        for (const [taskId, task] of transferMap.current)
+          if (!TERMINAL_TRANSFER_STATES.has(task.state))
+            transferMap.current.set(taskId, {
+              ...task,
+              state: "error",
+              error: task.error ?? "连接已断开",
+            });
+        publishTransfers();
       }
       if (event.type === "error" || event.type === "notice")
         setError(event.data);
       if (event.type === "transfer") {
-        pendingTransfer.current = event.data;
-        if (visibleRef.current) setTransfer(event.data);
+        const task = event.data as Transfer;
+        transferMap.current.set(task.taskId, task);
+        // 仅保留最近任务，避免长期运行后列表无限增长
+        for (const [taskId, item] of transferMap.current)
+          if (
+            transferMap.current.size > 30 &&
+            TERMINAL_TRANSFER_STATES.has(item.state)
+          )
+            transferMap.current.delete(taskId);
+        publishTransfers();
       }
     });
     void api
@@ -524,7 +541,11 @@ const SessionView = memo(function SessionView({
           id={session.id}
           protocol={hasTerminal ? "sftp" : session.profile.protocol}
           enabled={filesReady && status === "ready"}
-          transfer={transfer}
+          transfers={transfers}
+          onDismissTransfer={(taskId) => {
+            transferMap.current.delete(taskId);
+            publishTransfers();
+          }}
           collapsed={hasTerminal && !filesVisible}
           width={hasTerminal ? filePaneWidth : null}
           onWidthChange={hasTerminal ? onFilePaneWidthChange : undefined}

@@ -44,6 +44,10 @@ test(
     // 测试用节流与恶意目录项注入
     let ioDelay = 0;
     let malicious = null;
+    // 注入一次性 READ 失败：验证客户端退避后按已写入偏移重试
+    let failReadOnce = null;
+    // 注入一次性 OPENDIR 失败：验证目录扫描也会退避重试
+    let failListOnce = null;
     // SFTP 并发代理：同时打开的文件句柄数
     let openSftpFiles = 0;
     let maxSftpFiles = 0;
@@ -129,6 +133,11 @@ test(
             );
             sftp.on("OPENDIR", (id, p) =>
               safe(id, () => {
+                if (failListOnce && p === failListOnce) {
+                  failListOnce = null;
+                  sftp.status(id, 4);
+                  return;
+                }
                 const dir = fs.readdirSync(localPath(p)).map((name) => ({
                   filename: name,
                   longname: name,
@@ -158,7 +167,7 @@ test(
                   utils.sftp.flagsToString(flags),
                   attributes.mode ?? 0o600,
                 );
-                addHandle(id, { fd });
+                addHandle(id, { fd, path: p });
                 openSftpFiles += 1;
                 maxSftpFiles = Math.max(maxSftpFiles, openSftpFiles);
               }),
@@ -166,14 +175,18 @@ test(
             sftp.on("READ", (id, h, offset, length) => {
               const respond = () => {
                 try {
+                  const value = handles.get(h.readUInt32BE());
+                  if (
+                    failReadOnce &&
+                    value.path === failReadOnce &&
+                    offset > 0
+                  ) {
+                    failReadOnce = null;
+                    sftp.status(id, 4);
+                    return;
+                  }
                   const buffer = Buffer.alloc(length);
-                  const read = fs.readSync(
-                    handles.get(h.readUInt32BE()).fd,
-                    buffer,
-                    0,
-                    length,
-                    offset,
-                  );
+                  const read = fs.readSync(value.fd, buffer, 0, length, offset);
                   if (read) sftp.data(id, buffer.subarray(0, read));
                   else sftp.status(id, 1);
                 } catch {
@@ -565,6 +578,25 @@ test(
       },
     );
     await t.test(
+      "local write failures surface the reason on the failed task",
+      async () => {
+        events.length = 0;
+        destination = path.join(root, "missing-dir", "download.txt");
+        await assert.rejects(
+          invoke("sftp:download", "session", "/项目/payload.txt"),
+          /下载失败/,
+        );
+        const failed = transferEvents().at(-1);
+        assert.equal(failed.state, "error");
+        assert.match(failed.error, /下载失败/);
+        assert.equal(
+          fs.existsSync(path.dirname(destination)),
+          false,
+          "a failed local write must not create the destination directory",
+        );
+      },
+    );
+    await t.test(
       "folder upload recursively creates directories and refuses existing files",
       async () => {
         const folder = path.join(root, "bundle");
@@ -600,6 +632,11 @@ test(
           "bundle/top.txt",
         ]);
         assert.equal(completed.includes("bundle/link.txt"), false);
+        assert.equal(
+          lastTransfer().name,
+          "bundle",
+          "任务标题保持文件夹名，不随当前文件变化",
+        );
         assert.equal(
           fs.readFileSync(path.join(remote, "上传目录/bundle/top.txt"), "utf8"),
           "top",
@@ -657,6 +694,7 @@ test(
           false,
         );
         const done = transferEvents().find((event) => event.state === "done");
+        assert.equal(done.name, "下载树");
         assert.deepEqual(done.files, {
           completed: 2,
           total: 2,
@@ -787,12 +825,21 @@ test(
           transferEvents().some(
             (event) =>
               event.state === "running" &&
-              event.name === "cancel-source/z-big.bin" &&
+              event.file === "cancel-source/z-big.bin" &&
               event.transferred > 0,
           ),
         );
         await waitFor(() =>
           transferEvents().some((event) => event.files.completed >= 1),
+        );
+        const active = transferEvents().find(
+          (event) =>
+            event.file === "cancel-source/z-big.bin" && event.transferred > 0,
+        );
+        assert.equal(
+          active.name,
+          "cancel-source",
+          "任务标题保持文件夹名，当前文件名单独上报",
         );
         assert.equal(await invoke("transfer:cancel", "session"), true);
         assert.deepEqual(await cancelledRun, ["cancel-source/a-small.txt"]);
@@ -950,6 +997,116 @@ test(
       },
     );
     await t.test(
+      "multiple transfers run concurrently and file operations stay available",
+      async () => {
+        const folder = path.join(remote, "多任务");
+        fs.mkdirSync(folder);
+        const a = Buffer.alloc(4 * 1024 * 1024, 0x21);
+        const b = Buffer.alloc(4 * 1024 * 1024, 0x42);
+        fs.writeFileSync(path.join(folder, "a.bin"), a);
+        fs.writeFileSync(path.join(folder, "b.bin"), b);
+        ioDelay = 4;
+        events.length = 0;
+        const firstTarget = path.join(root, "多任务-a.bin");
+        destination = firstTarget;
+        const first = invoke("sftp:download", "session", "/多任务/a.bin");
+        await waitFor(() =>
+          transferEvents().some(
+            (event) => event.state === "running" && event.name === "a.bin",
+          ),
+        );
+        const secondTarget = path.join(root, "多任务-b.bin");
+        destination = secondTarget;
+        const second = invoke("sftp:download", "session", "/多任务/b.bin");
+        await waitFor(
+          () =>
+            new Set(
+              transferEvents()
+                .filter((event) => event.state === "running")
+                .map((event) => event.taskId),
+            ).size >= 2,
+        );
+
+        // 传输进行中浏览目录、新建与重命名保持可用
+        const listing = await invoke("sftp:list", "session", "/多任务");
+        assert.deepEqual(listing.files.map((file) => file.name).sort(), [
+          "a.bin",
+          "b.bin",
+        ]);
+        await invoke("sftp:mkdir", "session", "/", "传输中新建");
+        await invoke("files:rename", "session", "/传输中新建", "传输中改名");
+        assert.ok(fs.existsSync(path.join(remote, "传输中改名")));
+
+        // 只暂停其中一个任务，另一个任务不受影响
+        const firstTask = transferEvents().find(
+          (event) => event.state === "running" && event.name === "a.bin",
+        ).taskId;
+        assert.equal(
+          await invoke("transfer:pause", "session", firstTask),
+          true,
+        );
+        await waitFor(() =>
+          transferEvents().some(
+            (event) => event.taskId === firstTask && event.state === "paused",
+          ),
+        );
+        assert.equal(
+          await invoke("transfer:resume", "session", firstTask),
+          true,
+        );
+
+        assert.equal(await first, true);
+        assert.equal(await second, true);
+        assert.deepEqual(fs.readFileSync(firstTarget), a);
+        assert.deepEqual(fs.readFileSync(secondTarget), b);
+        const done = transferEvents().filter((event) => event.state === "done");
+        assert.equal(new Set(done.map((event) => event.taskId)).size, 2);
+        ioDelay = 0;
+      },
+    );
+    await t.test(
+      "transient SFTP read failures resume from the written offset",
+      async () => {
+        await invoke("sftp:mkdir", "session", "/", "重试");
+        const content = Buffer.alloc(256 * 1024, 0x33);
+        fs.writeFileSync(path.join(remote, "重试/retry.bin"), content);
+        events.length = 0;
+        failReadOnce = "/重试/retry.bin";
+        destination = path.join(root, "retry.bin");
+        assert.equal(
+          await invoke("sftp:download", "session", "/重试/retry.bin"),
+          true,
+        );
+        assert.equal(failReadOnce, null, "fault should have been triggered");
+        assert.deepEqual(fs.readFileSync(destination), content);
+        assert.equal(lastTransfer().state, "done");
+      },
+    );
+    await t.test(
+      "transient SFTP directory scan failures retry instead of failing the task",
+      async () => {
+        const tree = path.join(remote, "扫描重试");
+        fs.mkdirSync(path.join(tree, "nested"), { recursive: true });
+        fs.writeFileSync(path.join(tree, "a.txt"), "a");
+        fs.writeFileSync(path.join(tree, "nested", "b.txt"), "bb");
+        const parent = fs.mkdtempSync(path.join(root, "scan-"));
+        chooseFiles = [parent];
+        events.length = 0;
+        failListOnce = "/扫描重试";
+        assert.equal(await invoke("sftp:download", "session", "/扫描重试"), true);
+        assert.equal(failListOnce, null, "fault should have been triggered");
+        assert.equal(
+          fs.readFileSync(path.join(parent, "扫描重试/a.txt"), "utf8"),
+          "a",
+        );
+        assert.equal(
+          fs.readFileSync(path.join(parent, "扫描重试/nested/b.txt"), "utf8"),
+          "bb",
+        );
+        assert.equal(lastTransfer().state, "done");
+      },
+    );
+    await t.test(
       "concurrent conflicts share one prompt and batch failures stop the transfer",
       async () => {
         await invoke("sftp:mkdir", "session", "/", "冲突并发");
@@ -1002,9 +1159,83 @@ test(
         }
         const failed = transferEvents().at(-1);
         assert.equal(failed.state, "error");
+        assert.match(failed.error, /上传失败/);
         assert.equal(failed.files.failed, 1);
         assert.equal(failed.files.completed, 0);
         assert.equal(fs.readdirSync(failTarget).length, 0);
+      },
+    );
+    await t.test(
+      "disconnecting fails every running transfer and clears the task list",
+      async () => {
+        const folder = path.join(remote, "断线");
+        fs.mkdirSync(folder);
+        fs.writeFileSync(
+          path.join(folder, "a.bin"),
+          Buffer.alloc(4 * 1024 * 1024, 0x55),
+        );
+        fs.writeFileSync(
+          path.join(folder, "b.bin"),
+          Buffer.alloc(4 * 1024 * 1024, 0x56),
+        );
+        ioDelay = 4;
+        events.length = 0;
+        destination = path.join(root, "断线-a.bin");
+        const first = invoke("sftp:download", "session", "/断线/a.bin");
+        await waitFor(() =>
+          transferEvents().some(
+            (event) => event.state === "running" && event.name === "a.bin",
+          ),
+        );
+        destination = path.join(root, "断线-b.bin");
+        const second = invoke("sftp:download", "session", "/断线/b.bin");
+        await waitFor(
+          () =>
+            new Set(
+              transferEvents()
+                .filter((event) => event.state === "running")
+                .map((event) => event.taskId),
+            ).size >= 2,
+        );
+        const taskIds = [
+          ...new Set(
+            transferEvents()
+              .filter((event) => event.state === "running")
+              .map((event) => event.taskId),
+          ),
+        ];
+        // 先挂接拒绝处理再断线，避免两个任务同时失败时出现未处理拒绝
+        const settled = [assert.rejects(first), assert.rejects(second)];
+        await invoke("ssh:disconnect", "session");
+        // 断线时全部任务失败退出，未完成的本地临时文件被清理
+        await Promise.all(settled);
+        for (const taskId of taskIds) {
+          const states = transferEvents()
+            .filter((event) => event.taskId === taskId)
+            .map((event) => event.state);
+          assert.equal(states.at(-1), "error");
+          const final = transferEvents()
+            .filter((event) => event.taskId === taskId)
+            .at(-1);
+          assert.equal(final.error, "连接已断开");
+          assert.equal(
+            await invoke("transfer:pause", "session", taskId),
+            false,
+          );
+          assert.equal(
+            await invoke("transfer:cancel", "session", taskId),
+            false,
+          );
+        }
+        assert.equal(
+          fs.readdirSync(root).some((name) => name.endsWith(".part")),
+          false,
+        );
+        ioDelay = 0;
+        // 后续用例需要重新连接同一会话
+        await invoke("ssh:connect", "session", profile, {
+          password: "test-password",
+        });
       },
     );
     await t.test(
@@ -1416,6 +1647,57 @@ test(
             bytes,
           );
 
+        // 两个独立下载任务并发：各自租用连接池，主连接继续服务浏览与控制
+        const multiA = Buffer.alloc(4 * 1024 * 1024, 0x71);
+        const multiB = Buffer.alloc(4 * 1024 * 1024, 0x72);
+        fs.writeFileSync(path.join(ftpRoot, "多任务a.bin"), multiA);
+        fs.writeFileSync(path.join(ftpRoot, "多任务b.bin"), multiB);
+        ftpServer.setIoDelay(4);
+        ftpServer.resetStats();
+        events.length = 0;
+        const multiTargetA = path.join(root, "ftp-multi-a.bin");
+        const multiTargetB = path.join(root, "ftp-multi-b.bin");
+        destination = multiTargetA;
+        const multiAJob = invoke("sftp:download", "ftp", "/多任务a.bin");
+        await waitFor(() =>
+          transferEvents().some(
+            (event) =>
+              event.state === "running" && event.name === "多任务a.bin",
+          ),
+        );
+        destination = multiTargetB;
+        const multiBJob = invoke("sftp:download", "ftp", "/多任务b.bin");
+        await waitFor(
+          () =>
+            new Set(
+              transferEvents()
+                .filter((event) => event.state === "running")
+                .map((event) => event.taskId),
+            ).size >= 2,
+        );
+        assert.ok(
+          ftpServer.stats().connections >= 2,
+          "并发任务应使用额外控制连接",
+        );
+        const ftpListing = await invoke("sftp:list", "ftp", "/");
+        assert.ok(
+          ftpListing.files.some((file) => file.name === "多任务a.bin"),
+          "传输中主连接仍应可以浏览目录",
+        );
+        await invoke("sftp:mkdir", "ftp", "/", "传输中");
+        await invoke("files:rename", "ftp", "/传输中", "传输中改名");
+        assert.ok(fs.existsSync(path.join(ftpRoot, "传输中改名")));
+        assert.equal(await multiAJob, true);
+        assert.equal(await multiBJob, true);
+        assert.deepEqual(fs.readFileSync(multiTargetA), multiA);
+        assert.deepEqual(fs.readFileSync(multiTargetB), multiB);
+        const multiDone = transferEvents().filter(
+          (event) => event.state === "done",
+        );
+        assert.equal(new Set(multiDone.map((event) => event.taskId)).size, 2);
+        await waitFor(() => ftpServer.stats().connections === 1);
+        ftpServer.setIoDelay(0);
+
         // 服务器拒绝额外连接时降级为主连接串行，传输仍全部完成
         const limitedFolder = path.join(root, "ftp-limited");
         fs.mkdirSync(limitedFolder);
@@ -1525,6 +1807,20 @@ test(
         destination = path.join(root, "ftp-download.txt");
         await invoke("sftp:download", "ftp", "/资料/ftp-upload.txt");
         assert.deepEqual(fs.readFileSync(destination), data);
+        // 本地写入失败时任务项带出原因，且不残留临时文件
+        events.length = 0;
+        destination = path.join(root, "ftp-missing", "download.txt");
+        await assert.rejects(
+          invoke("sftp:download", "ftp", "/资料/ftp-upload.txt"),
+          /下载失败/,
+        );
+        const ftpWriteFailure = transferEvents().at(-1);
+        assert.equal(ftpWriteFailure.state, "error");
+        assert.match(ftpWriteFailure.error, /下载失败/);
+        assert.equal(
+          fs.readdirSync(root).some((name) => name.endsWith(".part")),
+          false,
+        );
         await invoke(
           "files:rename",
           "ftp",

@@ -70,11 +70,179 @@ const stateLabel = {
   error: "失败",
   cancelled: "已停止",
 } as const;
+function TransferItem({
+  id,
+  transfer,
+  onDismiss,
+  onError,
+}: {
+  id: string;
+  transfer: Transfer;
+  onDismiss?(taskId: string): void;
+  onError(message: string): void;
+}) {
+  const terminal = TERMINAL.has(transfer.state);
+  const overall = percentOf(transfer);
+  const fileStats = transfer.files;
+  const bytes = transfer.bytes;
+  const remaining = fileStats
+    ? Math.max(0, fileStats.total - fileStats.completed - fileStats.skipped)
+    : 0;
+  const control = (
+    operation: (id: string, taskId: string) => Promise<boolean>,
+  ) => {
+    void operation(id, transfer.taskId).catch((e) => onError(errorText(e)));
+  };
+  return (
+    <div className="transfer-item">
+      <div className="transfer-line">
+        <span className="transfer-name">
+          {transfer.direction === "upload" ? "↑" : "↓"}{" "}
+          {transfer.state === "preparing"
+            ? `${transfer.name ? `${transfer.name} · ` : ""}正在扫描…`
+            : transfer.name || "…"}
+        </span>
+        <span className="transfer-percent">
+          {terminal ? stateLabel[transfer.state] : `${Math.floor(overall)}%`}
+        </span>
+      </div>
+      <div
+        className={`progress ${transfer.state}${transfer.state === "preparing" ? " indeterminate" : ""}`}
+      >
+        {transfer.state !== "preparing" && (
+          <span style={{ width: `${overall}%` }} />
+        )}
+      </div>
+      {transfer.state === "preparing" ? (
+        <div className="transfer-meta">
+          已发现 {transfer.discovered ?? 0} 项
+        </div>
+      ) : (
+        <>
+          <div className="transfer-meta">
+            {(transfer.dirs?.total ?? 0) > (transfer.dirs?.completed ?? 0) && (
+              <span>
+                目录 {transfer.dirs?.completed ?? 0}/{transfer.dirs?.total ?? 0}
+              </span>
+            )}
+            <span>
+              已完成 {fileStats?.completed ?? 0}/{fileStats?.total ?? 0}
+              {(fileStats?.skipped ?? 0) > 0
+                ? `（跳过 ${fileStats?.skipped}）`
+                : ""}
+            </span>
+            <span>
+              {sizeText(bytes?.transferred ?? 0)} /{" "}
+              {sizeText(bytes?.total ?? 0)}
+            </span>
+            {(transfer.active ?? 0) > 1 && (
+              <span className="transfer-parallel">
+                并行 {transfer.active} 个文件
+              </span>
+            )}
+            <span>
+              {transfer.state === "paused"
+                ? "已暂停"
+                : `${sizeText(transfer.speed ?? 0)}/s`}
+            </span>
+            {transfer.eta != null && (
+              <span>剩余约 {durationText(transfer.eta)}</span>
+            )}
+          </div>
+          {!terminal && (transfer.total ?? 0) > 0 && (
+            <div className="transfer-current">
+              当前文件{" "}
+              {transfer.file && (
+                <span className="transfer-file">{transfer.file} · </span>
+              )}
+              {Math.min(
+                100,
+                Math.round(
+                  ((transfer.transferred ?? 0) / transfer.total!) * 100,
+                ),
+              )}
+              % · {sizeText(transfer.transferred ?? 0)} /{" "}
+              {sizeText(transfer.total!)}
+            </div>
+          )}
+        </>
+      )}
+      {terminal && transfer.state === "error" && transfer.error && (
+        <div className="transfer-error">{transfer.error}</div>
+      )}
+      {terminal && (
+        <div className="transfer-final">
+          <span className="transfer-summary">
+            {[
+              `${stateLabel[transfer.state]} ${fileStats?.completed ?? 0}/${fileStats?.total ?? 0}`,
+              (fileStats?.skipped ?? 0) > 0 ? `跳过 ${fileStats?.skipped}` : "",
+              (fileStats?.failed ?? 0) > 0 ? `失败 ${fileStats?.failed}` : "",
+              `共 ${sizeText(bytes?.transferred ?? 0)}`,
+              `耗时 ${transfer.elapsed ?? 0} 秒`,
+              transfer.state === "cancelled" && remaining > 0
+                ? `剩余 ${remaining} 项`
+                : "",
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+          {onDismiss && (
+            <button
+              className="icon-button"
+              title="清除传输记录"
+              aria-label="清除传输记录"
+              onClick={() => onDismiss(transfer.taskId)}
+            >
+              <X size={12} />
+            </button>
+          )}
+        </div>
+      )}
+      {!terminal && (
+        <div className="transfer-controls">
+          {transfer.state !== "preparing" && (
+            <button
+              className="secondary small"
+              onClick={() =>
+                control(
+                  transfer.state === "paused"
+                    ? api.resumeTransfer
+                    : api.pauseTransfer,
+                )
+              }
+            >
+              {transfer.state === "paused" ? (
+                <>
+                  <Play size={13} />
+                  继续
+                </>
+              ) : (
+                <>
+                  <Pause size={13} />
+                  暂停
+                </>
+              )}
+            </button>
+          )}
+          <button
+            className="secondary small danger"
+            onClick={() => control(api.cancelTransfer)}
+          >
+            <Square size={13} />
+            停止
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const FileBrowser = memo(function FileBrowser({
   id,
   protocol,
   enabled,
-  transfer,
+  transfers,
+  onDismissTransfer,
   collapsed = false,
   width = null,
   onWidthChange,
@@ -83,7 +251,8 @@ const FileBrowser = memo(function FileBrowser({
   id: string;
   protocol: string;
   enabled: boolean;
-  transfer: Transfer | null;
+  transfers: Transfer[];
+  onDismissTransfer?(taskId: string): void;
   collapsed?: boolean;
   width?: number | null;
   onWidthChange?(width: number | null): void;
@@ -104,6 +273,8 @@ const FileBrowser = memo(function FileBrowser({
     source?: string;
   } | null>(null);
   const running = useRef(false);
+  const directoryRef = useRef(directory);
+  directoryRef.current = directory;
   const listHost = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(500);
@@ -137,6 +308,11 @@ const FileBrowser = memo(function FileBrowser({
       running.current = false;
       setBusy(false);
     }
+  }
+  // 传输不占用面板：可以连续发起多个任务，其余文件操作保持可用
+  function startTransfer(operation: () => Promise<unknown>) {
+    setError("");
+    void operation().catch((e) => setError(errorText(e)));
   }
   useEffect(() => {
     if (enabled) void perform(() => refresh(null));
@@ -205,15 +381,20 @@ const FileBrowser = memo(function FileBrowser({
       })
       .filter((value, index, all) => value && all.indexOf(value) === index);
     if (!sources.length) return;
-    void perform(async () => {
-      await api.uploadPaths(id, directory, sources);
-      await refresh(directory);
+    const target = directory;
+    startTransfer(async () => {
+      await api.uploadPaths(id, target, sources);
+      if (directoryRef.current === target) await refresh(target);
     });
   }
   const download = (file: RemoteFile) =>
-    perform(() => api.download(id, join(directory, file.name)));
-  const control = (operation: (id: string) => Promise<boolean>) => {
-    void operation(id).catch((e) => setError(errorText(e)));
+    startTransfer(() => api.download(id, join(directory, file.name)));
+  const uploadAndRefresh = (mode: "files" | "folder") => {
+    const target = directory;
+    startTransfer(async () => {
+      await api.upload(id, target, mode);
+      if (directoryRef.current === target) await refresh(target);
+    });
   };
   function beginResize(event: ReactPointerEvent<HTMLDivElement>) {
     if (event.button !== 0 || !onWidthChange) return;
@@ -258,13 +439,6 @@ const FileBrowser = memo(function FileBrowser({
     onWidthChange?.(null);
     localStorage.removeItem("trident.file-pane-width");
   }
-  const terminal = transfer ? TERMINAL.has(transfer.state) : false;
-  const overall = transfer ? percentOf(transfer) : 0;
-  const fileStats = transfer?.files;
-  const bytes = transfer?.bytes;
-  const remaining = fileStats
-    ? Math.max(0, fileStats.total - fileStats.completed - fileStats.skipped)
-    : 0;
   return (
     <aside
       className="file-pane"
@@ -343,12 +517,7 @@ const FileBrowser = memo(function FileBrowser({
         <button
           className="secondary small"
           disabled={blocked}
-          onClick={() =>
-            void perform(async () => {
-              await api.upload(id, directory);
-              await refresh(directory);
-            })
-          }
+          onClick={() => uploadAndRefresh("files")}
         >
           <ArrowUpFromLine size={13} />
           上传文件
@@ -357,12 +526,7 @@ const FileBrowser = memo(function FileBrowser({
           className="secondary small"
           disabled={blocked}
           title="上传文件夹（含子目录）"
-          onClick={() =>
-            void perform(async () => {
-              await api.upload(id, directory, "folder");
-              await refresh(directory);
-            })
-          }
+          onClick={() => uploadAndRefresh("folder")}
         >
           <FolderUp size={13} />
           上传文件夹
@@ -522,144 +686,29 @@ const FileBrowser = memo(function FileBrowser({
         {visibleFiles.length} 项 · 选中后操作，双击打开或下载
         {enabled ? " · 可拖入本地文件或文件夹" : ""}
       </div>
-      <div className={`transfer-panel ${transfer?.state ?? ""}`}>
+      <div className="transfer-panel">
         <div className="pane-title">
           <ArrowDownToLine size={14} />
           文件传输
-          {transfer && (
-            <span>{transfer.direction === "upload" ? "上传" : "下载"}</span>
+          {transfers.length > 0 && (
+            <span>
+              {transfers.some((item) => !TERMINAL.has(item.state))
+                ? `进行中 ${transfers.filter((item) => !TERMINAL.has(item.state)).length}`
+                : `${transfers.length} 个任务`}
+            </span>
           )}
         </div>
-        {transfer ? (
-          <div className="transfer-item">
-            <div className="transfer-line">
-              <span className="transfer-name">
-                {transfer.direction === "upload" ? "↑" : "↓"}{" "}
-                {transfer.state === "preparing"
-                  ? "正在扫描…"
-                  : transfer.name || "…"}
-              </span>
-              <span className="transfer-percent">
-                {terminal
-                  ? stateLabel[transfer.state]
-                  : `${Math.floor(overall)}%`}
-              </span>
-            </div>
-            <div
-              className={`progress ${transfer.state}${transfer.state === "preparing" ? " indeterminate" : ""}`}
-            >
-              {transfer.state !== "preparing" && (
-                <span style={{ width: `${overall}%` }} />
-              )}
-            </div>
-            {transfer.state === "preparing" ? (
-              <div className="transfer-meta">
-                已发现 {transfer.discovered ?? 0} 项
-              </div>
-            ) : (
-              <>
-                <div className="transfer-meta">
-                  {(transfer.dirs?.total ?? 0) >
-                    (transfer.dirs?.completed ?? 0) && (
-                    <span>
-                      目录 {transfer.dirs?.completed ?? 0}/
-                      {transfer.dirs?.total ?? 0}
-                    </span>
-                  )}
-                  <span>
-                    已完成 {fileStats?.completed ?? 0}/{fileStats?.total ?? 0}
-                    {(fileStats?.skipped ?? 0) > 0
-                      ? `（跳过 ${fileStats?.skipped}）`
-                      : ""}
-                  </span>
-                  <span>
-                    {sizeText(bytes?.transferred ?? 0)} /{" "}
-                    {sizeText(bytes?.total ?? 0)}
-                  </span>
-                  {(transfer.active ?? 0) > 1 && (
-                    <span className="transfer-parallel">
-                      并行 {transfer.active} 个文件
-                    </span>
-                  )}
-                  <span>
-                    {transfer.state === "paused"
-                      ? "已暂停"
-                      : `${sizeText(transfer.speed ?? 0)}/s`}
-                  </span>
-                  {transfer.eta != null && (
-                    <span>剩余约 {durationText(transfer.eta)}</span>
-                  )}
-                </div>
-                {!terminal && (transfer.total ?? 0) > 0 && (
-                  <div className="transfer-current">
-                    当前文件{" "}
-                    {Math.min(
-                      100,
-                      Math.round(
-                        ((transfer.transferred ?? 0) / transfer.total!) * 100,
-                      ),
-                    )}
-                    % · {sizeText(transfer.transferred ?? 0)} /{" "}
-                    {sizeText(transfer.total!)}
-                  </div>
-                )}
-              </>
-            )}
-            {terminal && (
-              <div className="transfer-summary">
-                {[
-                  `${stateLabel[transfer.state]} ${fileStats?.completed ?? 0}/${fileStats?.total ?? 0}`,
-                  (fileStats?.skipped ?? 0) > 0
-                    ? `跳过 ${fileStats?.skipped}`
-                    : "",
-                  (fileStats?.failed ?? 0) > 0
-                    ? `失败 ${fileStats?.failed}`
-                    : "",
-                  `共 ${sizeText(bytes?.transferred ?? 0)}`,
-                  `耗时 ${transfer.elapsed ?? 0} 秒`,
-                  transfer.state === "cancelled" && remaining > 0
-                    ? `剩余 ${remaining} 项`
-                    : "",
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </div>
-            )}
-            {!terminal && (
-              <div className="transfer-controls">
-                {transfer.state !== "preparing" && (
-                  <button
-                    className="secondary small"
-                    onClick={() =>
-                      control(
-                        transfer.state === "paused"
-                          ? api.resumeTransfer
-                          : api.pauseTransfer,
-                      )
-                    }
-                  >
-                    {transfer.state === "paused" ? (
-                      <>
-                        <Play size={13} />
-                        继续
-                      </>
-                    ) : (
-                      <>
-                        <Pause size={13} />
-                        暂停
-                      </>
-                    )}
-                  </button>
-                )}
-                <button
-                  className="secondary small danger"
-                  onClick={() => control(api.cancelTransfer)}
-                >
-                  <Square size={13} />
-                  停止
-                </button>
-              </div>
-            )}
+        {transfers.length ? (
+          <div className="transfer-list">
+            {[...transfers].reverse().map((item) => (
+              <TransferItem
+                key={item.taskId}
+                id={id}
+                transfer={item}
+                onDismiss={onDismissTransfer}
+                onError={setError}
+              />
+            ))}
           </div>
         ) : (
           <div className="transfer-empty">暂无传输任务</div>
