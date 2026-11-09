@@ -39,8 +39,18 @@ const sizeText = (size: number) =>
     : size < 1048576
       ? `${(size / 1024).toFixed(1)} KB`
       : `${(size / 1048576).toFixed(1)} MB`;
+const durationText = (seconds: number) => {
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`;
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
+};
 const TERMINAL = new Set(["done", "error", "cancelled"]);
 const percentOf = (transfer: Transfer) => {
+  const dirs = transfer.dirs;
+  // 建目录阶段文件尚未开始，按目录进度展示，避免进度条长时间停在 0%
+  if (dirs && dirs.total > 0 && dirs.completed < dirs.total)
+    return Math.min(100, (dirs.completed / dirs.total) * 100);
   const bytes = transfer.bytes;
   if (bytes && bytes.total > 0)
     return Math.min(100, (bytes.transferred / bytes.total) * 100);
@@ -50,9 +60,6 @@ const percentOf = (transfer: Transfer) => {
       100,
       ((files.completed + files.skipped) / files.total) * 100,
     );
-  const dirs = transfer.dirs;
-  if (dirs && dirs.total > 0)
-    return Math.min(100, (dirs.completed / dirs.total) * 100);
   return transfer.state === "done" ? 100 : 0;
 };
 const stateLabel = {
@@ -552,6 +559,13 @@ const FileBrowser = memo(function FileBrowser({
             ) : (
               <>
                 <div className="transfer-meta">
+                  {(transfer.dirs?.total ?? 0) >
+                    (transfer.dirs?.completed ?? 0) && (
+                    <span>
+                      目录 {transfer.dirs?.completed ?? 0}/
+                      {transfer.dirs?.total ?? 0}
+                    </span>
+                  )}
                   <span>
                     已完成 {fileStats?.completed ?? 0}/{fileStats?.total ?? 0}
                     {(fileStats?.skipped ?? 0) > 0
@@ -562,11 +576,19 @@ const FileBrowser = memo(function FileBrowser({
                     {sizeText(bytes?.transferred ?? 0)} /{" "}
                     {sizeText(bytes?.total ?? 0)}
                   </span>
+                  {(transfer.active ?? 0) > 1 && (
+                    <span className="transfer-parallel">
+                      并行 {transfer.active} 个文件
+                    </span>
+                  )}
                   <span>
                     {transfer.state === "paused"
                       ? "已暂停"
                       : `${sizeText(transfer.speed ?? 0)}/s`}
                   </span>
+                  {transfer.eta != null && (
+                    <span>剩余约 {durationText(transfer.eta)}</span>
+                  )}
                 </div>
                 {!terminal && (transfer.total ?? 0) > 0 && (
                   <div className="transfer-current">

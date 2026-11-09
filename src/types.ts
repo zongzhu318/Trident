@@ -20,22 +20,19 @@ export type RemoteFile = {
   permissions: string;
 };
 export type TransferState =
-  | "preparing"
-  | "running"
-  | "paused"
-  | "done"
-  | "error"
-  | "cancelled";
+  "preparing" | "running" | "paused" | "done" | "error" | "cancelled";
 export type Transfer = {
   name: string;
   direction: "upload" | "download";
   state: TransferState;
   transferred?: number;
   total?: number;
+  active?: number;
   files?: { completed: number; total: number; skipped: number; failed: number };
   dirs?: { completed: number; total: number };
   bytes?: { transferred: number; total: number };
   speed?: number;
+  eta?: number | null;
   discovered?: number;
   elapsed?: number;
 };

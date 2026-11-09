@@ -7,9 +7,24 @@ module.exports = async function ftpServer(root) {
     dataServers = new Set();
   // 测试用节流：让大文件传输可持续足够久以便中途暂停
   let ioDelay = 0;
+  // 并发观测：控制连接数与同时进行的 STOR/APPE/RETR 数
+  let controlConnections = 0;
+  let maxControlConnections = 0;
+  let activeTransfers = 0;
+  let maxActiveTransfers = 0;
+  let rejectExtraConnections = false;
   const server = net.createServer((socket) => {
+    if (rejectExtraConnections && controlConnections > 0) {
+      socket.end("421 Too many connections\r\n");
+      return;
+    }
+    controlConnections += 1;
+    maxControlConnections = Math.max(maxControlConnections, controlConnections);
     connections.add(socket);
-    socket.on("close", () => connections.delete(socket));
+    socket.on("close", () => {
+      connections.delete(socket);
+      controlConnections -= 1;
+    });
     socket.on("error", () => {});
     socket.setEncoding("utf8");
     const send = (text) => socket.write(text + "\r\n");
@@ -72,58 +87,69 @@ module.exports = async function ftpServer(root) {
           return send(`350 Restarting at ${restart}`);
         }
         if (["MLSD", "LIST", "RETR", "STOR", "APPE"].includes(cmd)) {
-          send("150 Opening data connection");
-          const stream = await dataReady;
-          if (cmd === "STOR" || cmd === "APPE") {
-            // 边收边写，暂停中止时保留已写入部分，便于 APPE 续传
-            const fd = fs.openSync(local(arg), cmd === "APPE" ? "a" : "w");
-            try {
-              if (ioDelay > 0)
-                stream.on("data", (chunk) => {
-                  fs.writeSync(fd, chunk);
-                  stream.pause();
-                  setTimeout(() => stream.resume(), ioDelay);
-                });
-              else stream.on("data", (chunk) => fs.writeSync(fd, chunk));
-              // 正常结束或被客户端中止时都会触发 close
-              await once(stream, "close");
-            } finally {
-              fs.closeSync(fd);
-            }
-            stream.end();
-          } else {
-            let data;
-            if (cmd === "RETR") {
-              data = fs.readFileSync(local(arg));
-              if (restart > 0) {
-                data = data.subarray(restart);
-                restart = 0;
-              }
-            } else
-              data = fs
-                .readdirSync(local(arg || cwd))
-                .map((name) => {
-                  const stat = fs.statSync(path.join(local(arg || cwd), name));
-                  return `type=${stat.isDirectory() ? "dir" : "file"};size=${stat.size};modify=20261015090000; ${name}\r\n`;
-                })
-                .join("");
-            if (ioDelay > 0 && Buffer.isBuffer(data) && data.length) {
-              let offset = 0;
-              const push = () => {
-                if (stream.destroyed) return;
-                if (offset >= data.length) {
-                  stream.end();
-                  return;
-                }
-                stream.write(data.subarray(offset, offset + 32768));
-                offset += 32768;
-                setTimeout(push, ioDelay);
-              };
-              push();
-            } else stream.end(data);
-            await once(stream, "close");
+          const counted = cmd === "RETR" || cmd === "STOR" || cmd === "APPE";
+          if (counted) {
+            activeTransfers += 1;
+            maxActiveTransfers = Math.max(maxActiveTransfers, activeTransfers);
           }
-          return send("226 Transfer complete");
+          try {
+            send("150 Opening data connection");
+            const stream = await dataReady;
+            if (cmd === "STOR" || cmd === "APPE") {
+              // 边收边写，暂停中止时保留已写入部分，便于 APPE 续传
+              const fd = fs.openSync(local(arg), cmd === "APPE" ? "a" : "w");
+              try {
+                if (ioDelay > 0)
+                  stream.on("data", (chunk) => {
+                    fs.writeSync(fd, chunk);
+                    stream.pause();
+                    setTimeout(() => stream.resume(), ioDelay);
+                  });
+                else stream.on("data", (chunk) => fs.writeSync(fd, chunk));
+                // 正常结束或被客户端中止时都会触发 close
+                await once(stream, "close");
+              } finally {
+                fs.closeSync(fd);
+              }
+              stream.end();
+            } else {
+              let data;
+              if (cmd === "RETR") {
+                data = fs.readFileSync(local(arg));
+                if (restart > 0) {
+                  data = data.subarray(restart);
+                  restart = 0;
+                }
+              } else
+                data = fs
+                  .readdirSync(local(arg || cwd))
+                  .map((name) => {
+                    const stat = fs.statSync(
+                      path.join(local(arg || cwd), name),
+                    );
+                    return `type=${stat.isDirectory() ? "dir" : "file"};size=${stat.size};modify=20261015090000; ${name}\r\n`;
+                  })
+                  .join("");
+              if (ioDelay > 0 && Buffer.isBuffer(data) && data.length) {
+                let offset = 0;
+                const push = () => {
+                  if (stream.destroyed) return;
+                  if (offset >= data.length) {
+                    stream.end();
+                    return;
+                  }
+                  stream.write(data.subarray(offset, offset + 32768));
+                  offset += 32768;
+                  setTimeout(push, ioDelay);
+                };
+                push();
+              } else stream.end(data);
+              await once(stream, "close");
+            }
+            return send("226 Transfer complete");
+          } finally {
+            if (counted) activeTransfers -= 1;
+          }
         }
         if (cmd === "SIZE") return send(`213 ${fs.statSync(local(arg)).size}`);
         if (cmd === "MKD") {
@@ -169,6 +195,21 @@ module.exports = async function ftpServer(root) {
     port: server.address().port,
     setIoDelay(ms) {
       ioDelay = ms;
+    },
+    setRejectExtraConnections(value) {
+      rejectExtraConnections = Boolean(value);
+    },
+    stats() {
+      return {
+        connections: controlConnections,
+        maxConnections: maxControlConnections,
+        activeTransfers,
+        maxTransfers: maxActiveTransfers,
+      };
+    },
+    resetStats() {
+      maxControlConnections = controlConnections;
+      maxActiveTransfers = activeTransfers;
     },
     close() {
       for (const socket of connections) socket.destroy();

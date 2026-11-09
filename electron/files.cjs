@@ -80,15 +80,21 @@ function sftpFiles(sftp) {
       }
     },
     async ensureDirectory(target) {
+      // 先 mkdir：新建目录只需一次往返，已存在时再 stat 确认可合并
       try {
-        const attrs = await call(sftp, "stat", target);
-        if (!attrs.isDirectory())
-          throw new Error("远程已存在同名文件，无法创建目录");
+        await call(sftp, "mkdir", target);
         return;
       } catch (error) {
-        if (error.code !== 2) throw error;
+        let attrs;
+        try {
+          attrs = await call(sftp, "stat", target);
+        } catch {
+          // 目录不存在或无法读取时保留 mkdir 的原始错误
+          throw error;
+        }
+        if (!attrs.isDirectory())
+          throw new Error("远程已存在同名文件，无法创建目录");
       }
-      await call(sftp, "mkdir", target);
     },
     async rename(source, target) {
       try {
@@ -107,7 +113,7 @@ function sftpFiles(sftp) {
         target,
       );
     },
-    async upload(local, remote, report, { signal, start = 0 } = {}) {
+    async upload(local, remote, report, { signal, start = 0, onOpen } = {}) {
       const { size } = await fs.stat(local);
       report(start, size);
       const destination =
@@ -118,12 +124,28 @@ function sftpFiles(sftp) {
               mode: 0o600,
             })
           : sftp.createWriteStream(remote, { flags: "wx", mode: 0o600 });
-      await pipeline(
-        createReadStream(local, start > 0 ? { start } : undefined),
-        meter(report, start, size),
-        destination,
-        { signal },
-      );
+      let opened = false;
+      let openError = null;
+      destination.once("open", () => {
+        opened = true;
+        onOpen?.();
+      });
+      destination.once("error", (error) => {
+        if (!opened) openError = error;
+      });
+      try {
+        await pipeline(
+          createReadStream(local, start > 0 ? { start } : undefined),
+          meter(report, start, size),
+          destination,
+          { signal },
+        );
+      } catch (error) {
+        // 独占创建在打开阶段失败且尚未写入：可能只是同名冲突，交给上层确认
+        if (start === 0 && openError && !signal?.aborted)
+          error.sftpOpenFailed = true;
+        throw error;
+      }
     },
     async download(remote, local, report, { signal, start = 0 } = {}) {
       const { size } = await call(sftp, "lstat", remote);
@@ -214,10 +236,11 @@ function ftpFiles(client) {
         ? client.send(`RMD ${target}`)
         : client.remove(target);
     },
-    async upload(local, remote, report, { signal, start = 0 } = {}) {
+    async upload(local, remote, report, { signal, start = 0, onOpen } = {}) {
       if (signal?.aborted) throw new Error("传输已中止");
       const { size } = await fs.stat(local);
       report(start, size);
+      onOpen?.();
       const source = createReadStream(local, start > 0 ? { start } : undefined);
       let aborted = false;
       // 主动销毁源流会让 basic-ftp 关闭整条控制连接；改为正常结束数据流

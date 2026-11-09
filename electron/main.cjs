@@ -133,14 +133,12 @@ function disconnect(id) {
   if (session) {
     const controller = session.transfer;
     if (controller) {
-      // 断线视为失败：唤醒暂停等待器并中止当前文件，让 withFiles 释放锁
+      // 断线视为失败：唤醒暂停等待器并中止全部在途文件，让 withFiles 释放锁
       controller.disconnected = true;
       controller.paused = false;
       controller.state = "error";
-      controller.abort?.abort();
-      const wake = controller.wake;
-      controller.wake = null;
-      wake?.();
+      abortAll(controller);
+      wakeAll(controller);
       emitTransfer(controller, true);
       session.transfer = null;
     }
@@ -149,6 +147,7 @@ function disconnect(id) {
     sessions.delete(id);
     updater?.refreshBusy();
     if (session.ftp) {
+      closeFTPPool(session);
       session.client.close();
       emit(id, "close", null);
     } else session.client.destroy();
@@ -349,22 +348,33 @@ async function connectFTP(id, profile, credentials) {
   if (/[\r\n]/.test(profile.username + credentials.password))
     throw new Error("FTP 用户名和密码不能包含换行符");
   const client = new FTPClient(30000);
-  const session = { client, ftp: true, ready: false, transferring: false };
+  const session = {
+    id,
+    client,
+    ftp: true,
+    ready: false,
+    transferring: false,
+    // 仅驻留内存：连接池重连需要凭据；会话删除即释放，不落盘
+    ftpAccess: null,
+    ftpPool: new Set(),
+  };
   sessions.set(id, session);
   updater?.refreshBusy();
   try {
-    await client.access({
+    const access = {
       host: profile.host,
       port: profile.port,
       user: profile.username,
       password: credentials.password,
       secure: profile.protocol === "ftps",
       secureOptions: { rejectUnauthorized: true },
-    });
+    };
+    await client.access(access);
     if (sessions.get(id) !== session) {
       client.close();
       throw new Error("连接已取消");
     }
+    session.ftpAccess = access;
     session.files = ftpFiles(client);
     session.ready = true;
     client.ftp.socket.on("close", () => {
@@ -381,6 +391,32 @@ async function connectFTP(id, profile, credentials) {
     throw error;
   }
 }
+function closeFTPPool(session) {
+  if (!session.ftpPool) return;
+  for (const client of session.ftpPool) client.close();
+  session.ftpPool.clear();
+}
+async function openFTPPool(session, count) {
+  const clients = [];
+  for (let index = 0; index < count; index += 1) {
+    if (sessions.get(session.id) !== session || !session.ftpAccess) break;
+    const client = new FTPClient(30000);
+    try {
+      await client.access(session.ftpAccess);
+    } catch {
+      // 服务器限制连接数时不再扩容，使用已建立的连接（可能为零）
+      client.close();
+      break;
+    }
+    if (sessions.get(session.id) !== session || !session.ready) {
+      client.close();
+      break;
+    }
+    clients.push(client);
+    session.ftpPool.add(client);
+  }
+  return clients;
+}
 async function withFiles(id, operation) {
   const session = getSession(id);
   if (!session.files) throw new Error("此连接的文件服务不可用");
@@ -396,6 +432,11 @@ async function withFiles(id, operation) {
 
 const MAX_TRANSFER_ENTRIES = 20000;
 const TRANSFER_INTERVAL = 100;
+const SFTP_CONCURRENCY = 4;
+// 小文件主要受往返延迟限制，可安全提高并发；大文件仍用较低并发避免争抢带宽
+const SFTP_SMALL_CONCURRENCY = 16;
+const SFTP_SMALL_FILE_LIMIT = 1024 * 1024;
+const FTP_CONCURRENCY = 3;
 const TERMINAL_STATES = new Set(["done", "error", "cancelled"]);
 
 class TransferCancelled extends Error {
@@ -405,6 +446,27 @@ class TransferCancelled extends Error {
   }
 }
 
+// 文件因同名冲突被跳过：不计入完成、失败或部分上传结果
+class TransferSkipped extends Error {
+  constructor() {
+    super("文件已跳过");
+    this.name = "TransferSkipped";
+  }
+}
+
+function abortAll(c) {
+  for (const abort of c.aborts) abort.abort();
+}
+function wakeAll(c) {
+  const wakes = [...c.wakes];
+  c.wakes.clear();
+  for (const wake of wakes) wake();
+}
+function syncBytes(c) {
+  let transferred = c.completedBytes;
+  for (const item of c.active.values()) transferred += item.transferred;
+  c.bytes.transferred = transferred;
+}
 function resetSpeed(c) {
   c.samples = [{ time: Date.now(), bytes: c.bytes.transferred }];
 }
@@ -422,16 +484,24 @@ function sampleSpeed(c) {
 }
 function transferPayload(c) {
   const terminal = TERMINAL_STATES.has(c.state);
+  const speed = terminal || c.state === "paused" ? 0 : sampleSpeed(c);
+  const remainingBytes = Math.max(0, c.bytes.total - c.bytes.transferred);
   return {
     name: c.current.name,
     direction: c.direction,
     state: c.state,
     transferred: c.current.transferred,
     total: c.current.total,
+    active: c.active.size,
     files: { ...c.files },
     dirs: { ...c.dirs },
     bytes: { ...c.bytes },
-    speed: terminal || c.state === "paused" ? 0 : sampleSpeed(c),
+    speed,
+    // 剩余时间按最近数秒速率估算；速率未知、暂停或已结束时不给估计值
+    eta:
+      !terminal && c.state !== "paused" && speed > 0 && remainingBytes > 0
+        ? Math.ceil(remainingBytes / speed)
+        : null,
     discovered: c.discovered,
     elapsed: terminal ? Math.round((Date.now() - c.startedAt) / 1000) : 0,
   };
@@ -450,21 +520,26 @@ function createTransfer(id, session, direction) {
     paused: false,
     cancelled: false,
     disconnected: false,
-    abort: null,
-    wake: null,
+    stopping: false,
+    error: null,
+    // 每个 worker 与每个文件尝试各自持有 AbortController
+    aborts: new Set(),
+    wakes: new Set(),
     plan: [],
     partial: [],
     conflict: null,
+    conflictAsk: null,
     discovered: 0,
     startedAt: Date.now(),
     samples: [{ time: Date.now(), bytes: 0 }],
     lastEmit: 0,
     current: { name: "", transferred: 0, total: 0 },
+    // 在途文件：整体字节 = completedBytes + 全部 active 的 transferred
+    active: new Map(),
+    completedBytes: 0,
     files: { completed: 0, total: 0, skipped: 0, failed: 0 },
     dirs: { completed: 0, total: 0 },
     bytes: { transferred: 0, total: 0 },
-    // 已完成与跳过条目的源字节累计，当前文件进度在此基础上叠加
-    baseBytes: 0,
   };
   session.transfer = c;
   emitTransfer(c, true);
@@ -481,12 +556,13 @@ function checkCancelled(c) {
 }
 async function waitForResume(c) {
   while (c.paused && !c.cancelled) {
-    c.state = "paused";
-    emitTransfer(c, true);
+    if (c.state !== "paused") {
+      c.state = "paused";
+      emitTransfer(c, true);
+    }
     await new Promise((resolve) => {
-      c.wake = resolve;
+      c.wakes.add(resolve);
     });
-    c.wake = null;
   }
   checkCancelled(c);
   if (c.state === "paused") {
@@ -496,28 +572,40 @@ async function waitForResume(c) {
   }
 }
 async function skipConflict(c, entry, detail) {
+  checkCancelled(c);
   if (!c.conflict) {
-    // 批量传输逐文件询问不可用：首次冲突时询问一次并作用于整批
-    const { response } = await dialog.showMessageBox(window, {
-      type: "warning",
-      title: "同名文件",
-      message: `${entry.name} 已存在`,
-      detail: `${detail}「跳过所有同名文件并继续」将跳过本次传输中所有已存在的文件，不再逐个询问。`,
-      buttons: ["跳过所有同名文件并继续", "停止传输"],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-    });
-    if (response !== 0) {
-      c.cancelled = true;
-      throw new TransferCancelled();
+    // 并发 worker 共享同一次询问：只有第一个冲突创建弹窗，其余等待同一结果
+    if (!c.conflictAsk) {
+      c.conflictAsk = (async () => {
+        try {
+          const { response } = await dialog.showMessageBox(window, {
+            type: "warning",
+            title: "同名文件",
+            message: `${entry.name} 已存在`,
+            detail: `${detail}「跳过所有同名文件并继续」将跳过本次传输中所有已存在的文件，不再逐个询问。`,
+            buttons: ["跳过所有同名文件并继续", "停止传输"],
+            defaultId: 0,
+            cancelId: 1,
+            noLink: true,
+          });
+          if (response !== 0) {
+            c.cancelled = true;
+            abortAll(c);
+            wakeAll(c);
+            throw new TransferCancelled();
+          }
+          c.conflict = "skip";
+        } finally {
+          c.conflictAsk = null;
+        }
+      })();
     }
-    c.conflict = "skip";
+    await c.conflictAsk;
   }
   c.files.skipped += 1;
-  c.baseBytes += entry.size;
-  c.bytes.transferred = c.baseBytes;
+  c.completedBytes += entry.size;
   c.current = { name: entry.name, transferred: entry.size, total: entry.size };
+  syncBytes(c);
   emitTransfer(c, true);
 }
 async function runTransfer(session, c, execute) {
@@ -542,12 +630,8 @@ async function runTransfer(session, c, execute) {
     throw error;
   } finally {
     if (session.transfer === c) session.transfer = null;
-    c.abort = null;
-    if (c.wake) {
-      const wake = c.wake;
-      c.wake = null;
-      wake();
-    }
+    c.aborts.clear();
+    wakeAll(c);
   }
 }
 
@@ -599,10 +683,47 @@ async function collectUploadEntries(source, c) {
   await walk(source, name);
 }
 
+function setActive(c, entry, transferred) {
+  c.active.set(entry, {
+    name: entry.name,
+    transferred,
+    total: entry.size,
+  });
+  c.current = {
+    name: entry.name,
+    transferred,
+    total: entry.size,
+  };
+  syncBytes(c);
+}
+function reportActive(c, entry, transferred, total) {
+  const item = c.active.get(entry);
+  if (!item) return;
+  item.transferred = transferred;
+  item.total = total || entry.size;
+  c.current = {
+    name: item.name,
+    transferred,
+    total: item.total,
+  };
+  syncBytes(c);
+  emitTransfer(c);
+}
+async function cleanupPartial(files, c, entry) {
+  if (c.direction === "upload") {
+    // 只有本次真正打开/创建过远程文件时才清理，避免误删已存在的同名文件
+    if (entry.remote && entry.remoteTouched)
+      await files.remove(entry.remote).catch(() => {});
+  } else if (entry.temp) {
+    await fs.unlink(entry.temp).catch(() => {});
+  }
+}
+
 async function runUploadFile(files, c, entry) {
   let resumed = false;
   for (;;) {
     checkCancelled(c);
+    await waitForResume(c);
     let start = 0;
     if (resumed) {
       const remoteSize = await files.size(entry.remote);
@@ -611,50 +732,258 @@ async function runUploadFile(files, c, entry) {
         // 暂停时尚未写入任何字节，远端留下了空文件，重新独占创建
         await files.remove(entry.remote).catch(() => {});
       } else if (remoteSize != null) start = remoteSize;
-      c.current = { name: entry.name, transferred: start, total: entry.size };
-      c.bytes.transferred = c.baseBytes + start;
+      setActive(c, entry, start);
       emitTransfer(c, true);
-      await waitForResume(c);
     } else {
-      c.current = { name: entry.name, transferred: 0, total: entry.size };
-      c.bytes.transferred = c.baseBytes;
+      setActive(c, entry, 0);
       emitTransfer(c, true);
     }
     const abort = new AbortController();
-    c.abort = abort;
-    const report = (transferred, total) => {
-      c.current = {
-        name: entry.name,
-        transferred,
-        total: total || entry.size,
-      };
-      c.bytes.transferred = c.baseBytes + transferred;
-      emitTransfer(c);
-    };
+    c.aborts.add(abort);
+    const report = (transferred, total) =>
+      reportActive(c, entry, transferred, total);
     try {
       await files.upload(entry.local, entry.remote, report, {
         signal: abort.signal,
         start,
+        onOpen: () => {
+          entry.remoteTouched = true;
+        },
       });
       return;
     } catch (error) {
-      if (c.cancelled) {
-        // 当前远程文件由本次任务独占创建，尽力删除不完整内容
-        await files.remove(entry.remote).catch(() => {});
+      if (c.cancelled || c.stopping) {
+        // 停止或同批其它文件失败：仅尽力删除本次真正创建的不完整内容
+        if (entry.remoteTouched)
+          await files.remove(entry.remote).catch(() => {});
         throw new TransferCancelled();
       }
-      if (c.paused) {
+      if (c.disconnected) throw error;
+      // 暂停的 abort 可能到 resume 之后才抛错，以本次尝试的 signal 为准
+      if (abort.signal.aborted || c.paused) {
         resumed = true;
         continue;
       }
       throw error;
     } finally {
-      if (c.abort === abort) c.abort = null;
+      c.aborts.delete(abort);
     }
   }
 }
 
-async function uploadSources(files, target, sources, c) {
+// 小文件批次按 1 MiB 平均大小判断，避免为混合批次过度并发
+function sftpConcurrency(entries) {
+  if (entries.length <= SFTP_CONCURRENCY) return SFTP_CONCURRENCY;
+  const bytes = entries.reduce((sum, entry) => sum + entry.size, 0);
+  return bytes <= entries.length * SFTP_SMALL_FILE_LIMIT
+    ? SFTP_SMALL_CONCURRENCY
+    : SFTP_CONCURRENCY;
+}
+
+async function createTransferLanes(files, session, entries) {
+  const limit = session?.ftp ? FTP_CONCURRENCY : sftpConcurrency(entries);
+  const lanes = Math.min(limit, entries.length);
+  // 单文件不建立任何额外连接，保持现有行为
+  if (lanes <= 1) return [{ files }];
+  if (!session?.ftp) return Array.from({ length: lanes }, () => ({ files }));
+  const clients = await openFTPPool(session, lanes);
+  if (!clients.length) return [{ files }];
+  return clients.map((client) => ({ files: ftpFiles(client) }));
+}
+
+async function runFileWorkers(c, entries, lanes, task) {
+  let next = 0;
+  const workers = lanes.map((lane) =>
+    (async () => {
+      for (;;) {
+        if (c.error || c.cancelled || c.stopping) return;
+        await waitForResume(c);
+        if (c.error || c.cancelled || c.stopping) return;
+        const index = next;
+        next += 1;
+        if (index >= entries.length) return;
+        await task(lane, entries[index]);
+      }
+    })(),
+  );
+  await Promise.allSettled(workers);
+  if (c.error) throw c.error;
+  checkCancelled(c);
+}
+
+// 同层目录互不依赖，按层并发创建，父目录必然先于子目录完成
+async function createDirectories(c, directories, limit, create) {
+  const levels = new Map();
+  for (const entry of directories) {
+    const depth = entry.name.split("/").length;
+    const level = levels.get(depth);
+    if (level) level.push(entry);
+    else levels.set(depth, [entry]);
+  }
+  for (const depth of [...levels.keys()].sort((a, b) => a - b)) {
+    const level = levels.get(depth);
+    let next = 0;
+    let failure = null;
+    const workers = Array.from(
+      { length: Math.min(limit, level.length) },
+      async () => {
+        for (;;) {
+          if (failure || c.cancelled) return;
+          await waitForResume(c);
+          if (failure || c.cancelled) return;
+          const index = next;
+          next += 1;
+          if (index >= level.length) return;
+          const entry = level[index];
+          try {
+            await create(entry);
+          } catch (error) {
+            if (!failure)
+              failure = new Error(
+                `${entry.name} 目录创建失败：${error.message}`,
+              );
+            return;
+          }
+          c.dirs.completed += 1;
+          emitTransfer(c);
+        }
+      },
+    );
+    const results = await Promise.allSettled(workers);
+    const rejected = results.find((result) => result.status === "rejected");
+    if (rejected) throw rejected.reason;
+    if (failure) throw failure;
+    checkCancelled(c);
+  }
+}
+
+// POSIX 单引号转义：路径可包含空格、引号与 shell 元字符
+function shellQuote(value) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function runRemoteCommand(client, command, timeout = 15000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    let channel = null;
+    const settle = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    timer = setTimeout(() => {
+      channel?.destroy();
+      settle(new Error("远程命令超时"));
+    }, timeout);
+    client.exec(command, (error, stream) => {
+      channel = stream;
+      if (error) return settle(error);
+      let stderr = "";
+      let code = null;
+      stream.on("data", () => {});
+      stream.stderr.on("data", (chunk) => {
+        if (stderr.length < 4096) stderr += chunk;
+      });
+      stream.on("exit", (exitCode) => {
+        code = exitCode;
+      });
+      stream.on("error", (streamError) => settle(streamError));
+      stream.on("close", () => {
+        if (code === 0) settle();
+        else
+          settle(
+            new Error(stderr.trim() || `远程命令退出码 ${code ?? "未知"}`),
+          );
+      });
+    });
+  });
+}
+
+// 一次 mkdir -p 创建整棵目录树；命令被拒绝或未生效时回退逐目录创建
+async function execDirectories(session, c, directories) {
+  const chunks = [];
+  let chunk = [];
+  let length = 0;
+  for (const entry of directories) {
+    const arg = shellQuote(entry.remote);
+    if (chunk.length && length + arg.length > 16384) {
+      chunks.push(chunk);
+      chunk = [];
+      length = 0;
+    }
+    chunk.push(arg);
+    length += arg.length + 1;
+  }
+  if (chunk.length) chunks.push(chunk);
+  try {
+    let completed = 0;
+    for (const args of chunks) {
+      checkCancelled(c);
+      await waitForResume(c);
+      await runRemoteCommand(session.client, `mkdir -p ${args.join(" ")}`);
+      completed += args.length;
+      c.dirs.completed = completed;
+      emitTransfer(c);
+    }
+    // 某些服务器会以 0 退出但实际未执行命令（如 ForceCommand），抽查最深目录兜底
+    const deepest = directories.at(-1);
+    const verified = await session.files.details(deepest.remote).then(
+      (item) => Boolean(item?.directory),
+      () => false,
+    );
+    if (verified) {
+      c.dirs.completed = directories.length;
+      emitTransfer(c, true);
+      return;
+    }
+  } catch (error) {
+    if (c.cancelled || c.error) throw error;
+  }
+  // 回退路径会重新确保全部目录，已存在的目录按合并处理
+  c.dirs.completed = 0;
+  await createDirectories(c, directories, SFTP_CONCURRENCY, (entry) =>
+    session.files.ensureDirectory(entry.remote),
+  );
+}
+
+async function runFileTask(lane, c, entry, failure, transfer) {
+  try {
+    await transfer(lane.files);
+  } catch (error) {
+    if (error instanceof TransferCancelled) throw error;
+    if (error instanceof TransferSkipped) {
+      c.active.delete(entry);
+      syncBytes(c);
+      return false;
+    }
+    // 另一个 worker 已经记录了首个错误：按停止路径清理后退出，不覆盖错误
+    if (c.error) {
+      await cleanupPartial(lane.files, c, entry);
+      throw new TransferCancelled();
+    }
+    c.files.failed += 1;
+    c.error = new Error(failure(error));
+    c.stopping = true;
+    abortAll(c);
+    throw c.error;
+  }
+  c.files.completed += 1;
+  c.completedBytes += entry.size;
+  c.active.delete(entry);
+  c.current = {
+    name: entry.name,
+    transferred: entry.size,
+    total: entry.size,
+  };
+  syncBytes(c);
+  emitTransfer(c, true);
+  return true;
+}
+
+async function uploadSources(files, target, sources, c, session) {
   for (const source of sources) await collectUploadEntries(source, c);
   for (const entry of c.plan)
     entry.remote = validate.remotePath(path.posix.join(target, entry.name));
@@ -663,42 +992,59 @@ async function uploadSources(files, target, sources, c) {
   c.state = "running";
   resetSpeed(c);
   emitTransfer(c, true);
-  for (const entry of c.plan) {
-    checkCancelled(c);
-    await waitForResume(c);
-    if (entry.directory) {
-      try {
-        await files.ensureDirectory(entry.remote);
-      } catch (error) {
-        throw new Error(`${entry.name} 目录创建失败：${error.message}`);
-      }
-      c.dirs.completed += 1;
-      emitTransfer(c);
-      continue;
-    }
-    if (await files.exists(entry.remote)) {
-      await skipConflict(c, entry, "远程目录中已存在同名文件。");
-      continue;
-    }
-    try {
-      await runUploadFile(files, c, entry);
-    } catch (error) {
-      if (error instanceof TransferCancelled) throw error;
-      c.files.failed += 1;
-      throw new Error(
-        `${entry.name} 上传失败：${error.message}；如传输已开始，远程可能保留不完整文件`,
+  const directories = c.plan.filter((entry) => entry.directory);
+  const pending = c.plan.filter((entry) => !entry.directory);
+  if (directories.length) {
+    if (!session?.ftp && session?.client && session?.sftp)
+      await execDirectories(session, c, directories);
+    else
+      // FTP 主连接同一时刻只能执行一条命令，并发不会更快
+      await createDirectories(
+        c,
+        directories,
+        session?.ftp ? 1 : SFTP_CONCURRENCY,
+        (entry) => files.ensureDirectory(entry.remote),
       );
+  }
+  if (pending.length) {
+    try {
+      const lanes = await createTransferLanes(files, session, pending);
+      await runFileWorkers(c, pending, lanes, async (lane, entry) => {
+        // FTP 的 STOR 会直接覆盖，必须先确认同名冲突
+        if (session?.ftp && (await lane.files.exists(entry.remote))) {
+          await skipConflict(c, entry, "远程目录中已存在同名文件。");
+          return;
+        }
+        const completed = await runFileTask(
+          lane,
+          c,
+          entry,
+          (error) =>
+            `${entry.name} 上传失败：${error.message}；如传输已开始，远程可能保留不完整文件`,
+          async (laneFiles) => {
+            try {
+              await runUploadFile(laneFiles, c, entry);
+            } catch (error) {
+              if (error instanceof TransferCancelled) throw error;
+              // 独占创建在写入前失败时再确认同名冲突，正常文件省去一次 lstat 往返
+              if (
+                error.sftpOpenFailed &&
+                (await laneFiles.exists(entry.remote).catch(() => false))
+              ) {
+                c.active.delete(entry);
+                syncBytes(c);
+                await skipConflict(c, entry, "远程目录中已存在同名文件。");
+                throw new TransferSkipped();
+              }
+              throw error;
+            }
+          },
+        );
+        if (completed) c.partial.push(entry.name);
+      });
+    } finally {
+      if (session?.ftp) closeFTPPool(session);
     }
-    c.files.completed += 1;
-    c.baseBytes += entry.size;
-    c.bytes.transferred = c.baseBytes;
-    c.current = {
-      name: entry.name,
-      transferred: entry.size,
-      total: entry.size,
-    };
-    emitTransfer(c, true);
-    c.partial.push(entry.name);
   }
   return c.partial;
 }
@@ -770,6 +1116,7 @@ async function runDownloadFile(files, c, entry) {
   let resumed = false;
   for (;;) {
     checkCancelled(c);
+    await waitForResume(c);
     let start = 0;
     if (resumed) {
       const size = await fs
@@ -781,26 +1128,16 @@ async function runDownloadFile(files, c, entry) {
         return;
       }
       start = size;
-      c.current = { name: entry.name, transferred: start, total: entry.size };
-      c.bytes.transferred = c.baseBytes + start;
+      setActive(c, entry, start);
       emitTransfer(c, true);
-      await waitForResume(c);
     } else {
-      c.current = { name: entry.name, transferred: 0, total: entry.size };
-      c.bytes.transferred = c.baseBytes;
+      setActive(c, entry, 0);
       emitTransfer(c, true);
     }
     const abort = new AbortController();
-    c.abort = abort;
-    const report = (transferred, total) => {
-      c.current = {
-        name: entry.name,
-        transferred,
-        total: total || entry.size,
-      };
-      c.bytes.transferred = c.baseBytes + transferred;
-      emitTransfer(c);
-    };
+    c.aborts.add(abort);
+    const report = (transferred, total) =>
+      reportActive(c, entry, transferred, total);
     try {
       await files.download(entry.remote, entry.temp, report, {
         signal: abort.signal,
@@ -809,11 +1146,16 @@ async function runDownloadFile(files, c, entry) {
       await fs.rename(entry.temp, entry.local);
       return;
     } catch (error) {
-      if (c.cancelled) {
+      if (c.cancelled || c.stopping) {
         await fs.unlink(entry.temp).catch(() => {});
         throw new TransferCancelled();
       }
-      if (c.paused) {
+      if (c.disconnected) {
+        await fs.unlink(entry.temp).catch(() => {});
+        throw error;
+      }
+      // 暂停的 abort 可能到 resume 之后才抛错，以本次尝试的 signal 为准
+      if (abort.signal.aborted || c.paused) {
         // 暂停保留 .part 临时文件，继续时以实际大小作为偏移
         resumed = true;
         continue;
@@ -821,53 +1163,53 @@ async function runDownloadFile(files, c, entry) {
       await fs.unlink(entry.temp).catch(() => {});
       throw error;
     } finally {
-      if (c.abort === abort) c.abort = null;
+      c.aborts.delete(abort);
     }
   }
 }
 
-async function downloadPlan(files, c) {
+async function downloadPlan(files, c, session) {
   initializeStats(c);
   await waitForResume(c);
   c.state = "running";
   resetSpeed(c);
   emitTransfer(c, true);
-  for (const entry of c.plan) {
+  const directories = c.plan.filter((entry) => entry.directory);
+  const pending = c.plan.filter((entry) => !entry.directory);
+  for (const entry of directories) {
     checkCancelled(c);
     await waitForResume(c);
-    if (entry.directory) {
-      await ensureLocalDirectory(entry.local);
-      c.dirs.completed += 1;
-      emitTransfer(c);
-      continue;
-    }
-    if (!entry.overwrite) {
-      const exists = await fs.lstat(entry.local).then(
-        () => true,
-        (error) => (error.code === "ENOENT" ? false : Promise.reject(error)),
-      );
-      if (exists) {
-        await skipConflict(c, entry, "本地目标中已存在同名文件。");
-        continue;
-      }
-    }
-    entry.temp = `${entry.local}.${randomUUID()}.part`;
+    await ensureLocalDirectory(entry.local);
+    c.dirs.completed += 1;
+    emitTransfer(c);
+  }
+  if (pending.length) {
     try {
-      await runDownloadFile(files, c, entry);
-    } catch (error) {
-      if (error instanceof TransferCancelled) throw error;
-      c.files.failed += 1;
-      throw new Error(`${entry.name} 下载失败：${error.message}`);
+      const lanes = await createTransferLanes(files, session, pending);
+      await runFileWorkers(c, pending, lanes, async (lane, entry) => {
+        if (!entry.overwrite) {
+          const exists = await fs.lstat(entry.local).then(
+            () => true,
+            (error) =>
+              error.code === "ENOENT" ? false : Promise.reject(error),
+          );
+          if (exists) {
+            await skipConflict(c, entry, "本地目标中已存在同名文件。");
+            return;
+          }
+        }
+        entry.temp = `${entry.local}.${randomUUID()}.part`;
+        await runFileTask(
+          lane,
+          c,
+          entry,
+          (error) => `${entry.name} 下载失败：${error.message}`,
+          (laneFiles) => runDownloadFile(laneFiles, c, entry),
+        );
+      });
+    } finally {
+      if (session?.ftp) closeFTPPool(session);
     }
-    c.files.completed += 1;
-    c.baseBytes += entry.size;
-    c.bytes.transferred = c.baseBytes;
-    c.current = {
-      name: entry.name,
-      transferred: entry.size,
-      total: entry.size,
-    };
-    emitTransfer(c, true);
   }
 }
 
@@ -882,10 +1224,8 @@ function pauseTransfer(id) {
   if (c.paused) return true;
   c.paused = true;
   if (c.state === "running") c.state = "paused";
-  c.abort?.abort();
-  const wake = c.wake;
-  c.wake = null;
-  wake?.();
+  abortAll(c);
+  wakeAll(c);
   emitTransfer(c, true);
   return true;
 }
@@ -898,9 +1238,7 @@ function resumeTransfer(id) {
     c.state = "running";
     resetSpeed(c);
   }
-  const wake = c.wake;
-  c.wake = null;
-  wake?.();
+  wakeAll(c);
   emitTransfer(c, true);
   return true;
 }
@@ -910,10 +1248,8 @@ function cancelTransfer(id) {
   if (c.cancelled) return true;
   c.cancelled = true;
   c.state = "cancelled";
-  c.abort?.abort();
-  const wake = c.wake;
-  c.wake = null;
-  wake?.();
+  abortAll(c);
+  wakeAll(c);
   emitTransfer(c, true);
   return true;
 }
@@ -1142,7 +1478,7 @@ function registerIPC() {
       if (choice.canceled || !choice.filePaths?.length) return [];
       const controller = createTransfer(id, session, "upload");
       return runTransfer(session, controller, () =>
-        uploadSources(files, target, choice.filePaths, controller),
+        uploadSources(files, target, choice.filePaths, controller, session),
       );
     }),
   );
@@ -1152,7 +1488,7 @@ function registerIPC() {
       const paths = validate.localPaths(sources);
       const controller = createTransfer(id, session, "upload");
       return runTransfer(session, controller, () =>
-        uploadSources(files, target, paths, controller),
+        uploadSources(files, target, paths, controller, session),
       );
     }),
   );
@@ -1181,7 +1517,7 @@ function registerIPC() {
         return runTransfer(session, controller, async () => {
           // 扫描完成前不创建任何本地目录，失败或停止时不留空目录
           await collectDownloadEntries(files, source, controller, root);
-          await downloadPlan(files, controller);
+          await downloadPlan(files, controller, session);
           return true;
         });
       }
@@ -1204,7 +1540,7 @@ function registerIPC() {
             overwrite: true,
           },
         ];
-        await downloadPlan(files, controller);
+        await downloadPlan(files, controller, session);
         return true;
       });
     }),

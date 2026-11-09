@@ -1485,6 +1485,9 @@ body.resizing * {
   font-size: 9px;
   color: var(--subtle);
 }
+.transfer-parallel {
+  color: var(--accent-muted);
+}
 .transfer-summary {
   font-size: 9px;
   color: var(--subtle);

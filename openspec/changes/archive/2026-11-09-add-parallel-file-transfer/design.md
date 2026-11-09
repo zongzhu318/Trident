@@ -30,18 +30,20 @@
 
 ## Decisions
 
-### D1：两阶段执行，目录串行、文件并发
+### D1：两阶段执行，目录按层并发、文件并发
 
 `uploadSources` 与 `downloadPlan` 在 `running` 状态开始后：
 
-1. 目录阶段：按计划顺序遍历 `entry.directory`，上传调用 `files.ensureDirectory`，下载调用 `ensureLocalDirectory`。目录数量小，串行避免并发 `mkdir` 的竞态，也保证文件写入时父目录已存在。
+1. 目录阶段：按层级遍历 `entry.directory`，同层目录互不依赖，使用与文件阶段相同的并发上限并发创建，父目录必然先于子目录完成。SSH/SFTP 会话优先把全部目录路径拼成一次（超长时分块）`mkdir -p` 远程命令，用一个往返创建整棵树；命令被拒绝、未生效或校验最深目录不存在时，回退到逐目录创建。上传逐目录创建会先 `mkdir`、失败后再 `stat` 确认是否可合并，新建目录只产生一次协议往返。下载调用 `ensureLocalDirectory`。
 2. 文件阶段：仅收集非目录条目，交给工作池。
 
-目录阶段沿用 `checkCancelled` / `waitForResume` 检查点；目录统计与非目录统计沿用现有字段。若目录阶段失败，整个传输以失败结束，不进入文件阶段。与"边建目录边传文件"相比，两阶段多一次遍历但实现和错误语义更简单，空目录也仍会创建。
+目录阶段沿用 `checkCancelled` / `waitForResume` 检查点；目录统计与非目录统计沿用现有字段。若目录阶段失败，其余同层目录不再开始，整个传输以失败结束，不进入文件阶段。与"边建目录边传文件"相比，两阶段多一次遍历但实现和错误语义更简单，空目录也仍会创建。
 
 ### D2：并发度使用内部常量，实际并发取文件数与上限的较小值
 
 - `SFTP_CONCURRENCY = 4`、`FTP_CONCURRENCY = 3`（不含主连接）。
+- 平均文件大小不超过 1 MiB 且文件数超过 4 的 SFTP 批次使用 `SFTP_SMALL_CONCURRENCY = 16`：小文件的耗时由往返延迟主导，提高并发收益明显；大文件仍保持 4，避免争抢带宽。
+- 上传的冲突检测不再为每个 SFTP 文件预先 `lstat`：独占创建（`wx`）在打开阶段失败且尚未写入时，再确认远程是否已存在；FTP 的 `STOR` 会覆盖，仍保留上传前检查。
 - `lanes = min(并发上限, 文件条目数)`；只有一个文件时不创建任何额外连接，行为与现状一致。
 - 不暴露设置：不同服务器的连接限制差异很大，自动降级比让用户配置更可靠；后续需要时可在 `preferences` 上独立演进。
 
@@ -114,7 +116,7 @@ await Promise.allSettled(lanes.map(worker))
 
 ### D9：进度事件与渲染层增量
 
-`transferPayload` 保持现有字段，新增 `active`。`src/types.ts` 的 `Transfer` 增加 `active: number`；`src/FileBrowser.tsx` 在运行/暂停状态显示活动文件数，`src/App.tsx` 帮助文本与 `README.md` 补充批量并发与 FTP 连接数限制说明。结束汇总、按钮状态与 `done/error/cancelled` 逻辑不变。
+`transferPayload` 保持现有字段，新增 `active` 与 `eta`。`src/types.ts` 的 `Transfer` 增加 `active: number` 与 `eta?: number | null`；`src/FileBrowser.tsx` 在运行/暂停状态显示活动文件数，运行时按剩余字节除以最近 3 秒聚合速率估算剩余时间（向上取整秒），速率未知、暂停或已结束时为 `null`，面板不展示。`src/App.tsx` 帮助文本与 `README.md` 补充批量并发、FTP 连接数限制与预计剩余时间说明。结束汇总、按钮状态与 `done/error/cancelled` 逻辑不变。
 
 ### D10：测试可观测性
 

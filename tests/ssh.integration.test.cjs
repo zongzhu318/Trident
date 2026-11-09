@@ -8,6 +8,26 @@ const path = require("node:path");
 const Module = require("node:module");
 const { Server, utils } = require("ssh2");
 const startFTP = require("./helpers/ftp-server.cjs");
+
+// 测试服务器只接受应用生成的单引号路径参数
+function parseShellWords(text) {
+  const words = [];
+  let word = "";
+  let quoted = false;
+  for (const char of text) {
+    if (quoted) {
+      if (char === "'") quoted = false;
+      else word += char;
+    } else if (char === "'") quoted = true;
+    else if (char === " ") {
+      if (word) words.push(word);
+      word = "";
+    } else word += char;
+  }
+  if (word) words.push(word);
+  return words;
+}
+
 test(
   "real SSH and SFTP through the application IPC handlers",
   { timeout: 120000 },
@@ -20,9 +40,16 @@ test(
     }).privateKey.export({ type: "pkcs1", format: "pem" });
     const clients = new Set();
     let shellRequests = 0;
+    const execRequests = [];
     // 测试用节流与恶意目录项注入
     let ioDelay = 0;
     let malicious = null;
+    // SFTP 并发代理：同时打开的文件句柄数
+    let openSftpFiles = 0;
+    let maxSftpFiles = 0;
+    const resetSftpStats = () => {
+      maxSftpFiles = openSftpFiles;
+    };
     const server = new Server({ hostKeys: [hostKey] }, (client) => {
       clients.add(client);
       client.on("close", () => clients.delete(client));
@@ -37,6 +64,10 @@ test(
       client.on("ready", () =>
         client.on("session", (accept) => {
           const session = accept();
+          const localPath = (p) => {
+            const normalized = path.posix.normalize("/" + p);
+            return path.join(remote, normalized);
+          };
           session.on("pty", (accept) => accept());
           session.on("window-change", (accept) => accept?.());
           session.on("shell", (accept) => {
@@ -45,14 +76,27 @@ test(
             stream.write("Welcome to local integration server\r\n");
             stream.on("data", (data) => stream.write(`echo:${data}`));
           });
+          session.on("exec", (accept, reject, info) => {
+            const command = String(info.command || "");
+            execRequests.push(command);
+            const stream = accept();
+            try {
+              const match = /^mkdir -p (.*)$/.exec(command);
+              if (!match) throw new Error("不支持的命令");
+              for (const word of parseShellWords(match[1]))
+                fs.mkdirSync(localPath(word), { recursive: true });
+              stream.exit(0);
+              stream.end();
+            } catch (error) {
+              stream.stderr.write(error.message);
+              stream.exit(1);
+              stream.end();
+            }
+          });
           session.on("sftp", (accept) => {
             const sftp = accept();
             const handles = new Map();
             let nextHandle = 0;
-            const localPath = (p) => {
-              const normalized = path.posix.normalize("/" + p);
-              return path.join(remote, normalized);
-            };
             const attrs = (stat) => ({
               mode: stat.mode,
               uid: stat.uid,
@@ -108,15 +152,16 @@ test(
               }),
             );
             sftp.on("OPEN", (id, p, flags, attributes) =>
-              safe(id, () =>
-                addHandle(id, {
-                  fd: fs.openSync(
-                    localPath(p),
-                    utils.sftp.flagsToString(flags),
-                    attributes.mode ?? 0o600,
-                  ),
-                }),
-              ),
+              safe(id, () => {
+                const fd = fs.openSync(
+                  localPath(p),
+                  utils.sftp.flagsToString(flags),
+                  attributes.mode ?? 0o600,
+                );
+                addHandle(id, { fd });
+                openSftpFiles += 1;
+                maxSftpFiles = Math.max(maxSftpFiles, openSftpFiles);
+              }),
             );
             sftp.on("READ", (id, h, offset, length) => {
               const respond = () => {
@@ -192,7 +237,10 @@ test(
             sftp.on("CLOSE", (id, h) =>
               safe(id, () => {
                 const value = handles.get(h.readUInt32BE());
-                if (value.fd !== undefined) fs.closeSync(value.fd);
+                if (value.fd !== undefined) {
+                  fs.closeSync(value.fd);
+                  openSftpFiles -= 1;
+                }
                 handles.delete(h.readUInt32BE());
                 sftp.status(id, 0);
               }),
@@ -202,6 +250,7 @@ test(
                 if (value.fd !== undefined) {
                   try {
                     fs.closeSync(value.fd);
+                    openSftpFiles -= 1;
                   } catch {}
                 }
             });
@@ -533,12 +582,19 @@ test(
         }
         await invoke("sftp:mkdir", "session", "/", "上传目录");
         chooseFiles = [folder];
+        const execBefore = execRequests.length;
         const completed = await invoke(
           "sftp:upload",
           "session",
           "/上传目录",
           "folder",
         );
+        assert.equal(
+          execRequests.length,
+          execBefore + 1,
+          "整棵目录树应通过一次远程命令创建",
+        );
+        assert.match(execRequests.at(-1), /^mkdir -p /);
         assert.deepEqual(completed.sort(), [
           "bundle/nested/deep.txt",
           "bundle/top.txt",
@@ -682,8 +738,19 @@ test(
             (event) =>
               event.state === "running" &&
               event.name === "big.bin" &&
-              event.transferred > 0,
+              event.transferred > 0 &&
+              event.speed > 0,
           ),
+        );
+        const running = transferEvents()
+          .filter((event) => event.state === "running" && event.speed > 0)
+          .at(-1);
+        assert.equal(
+          running.eta,
+          Math.ceil(
+            (running.bytes.total - running.bytes.transferred) / running.speed,
+          ),
+          "剩余时间应按剩余字节与当前速率估算",
         );
         assert.equal(await invoke("transfer:pause", "session"), true);
         await waitFor(() =>
@@ -693,6 +760,7 @@ test(
           .filter((event) => event.state === "paused")
           .at(-1);
         assert.equal(paused.speed, 0);
+        assert.equal(paused.eta, null, "暂停时不应展示剩余时间");
         const partial = await stableSize(target);
         assert.ok(partial > 0 && partial < data.length);
         assert.equal(fs.statSync(target).size, partial, "暂停期间不得继续写入");
@@ -723,6 +791,9 @@ test(
               event.transferred > 0,
           ),
         );
+        await waitFor(() =>
+          transferEvents().some((event) => event.files.completed >= 1),
+        );
         assert.equal(await invoke("transfer:cancel", "session"), true);
         assert.deepEqual(await cancelledRun, ["cancel-source/a-small.txt"]);
         assert.equal(
@@ -745,6 +816,195 @@ test(
         assert.equal(await invoke("transfer:pause", "session"), false);
         await invoke("sftp:mkdir", "session", "/", "取消后");
         assert.ok(fs.existsSync(path.join(remote, "取消后")));
+      },
+    );
+    await t.test(
+      "SFTP transfers multiple files concurrently within the stream limit",
+      async () => {
+        const folder = path.join(root, "sftp-concurrent");
+        fs.mkdirSync(folder);
+        const payloads = new Map();
+        for (let index = 0; index < 6; index += 1) {
+          const name = `f${index}.bin`;
+          const data = Buffer.alloc(256 * 1024, index + 1);
+          fs.writeFileSync(path.join(folder, name), data);
+          payloads.set(name, data);
+        }
+        await invoke("sftp:mkdir", "session", "/", "并发");
+        ioDelay = 2;
+        resetSftpStats();
+        events.length = 0;
+        const uploaded = await invoke("sftp:upload-paths", "session", "/并发", [
+          folder,
+        ]);
+        assert.equal(uploaded.length, payloads.size);
+        assert.ok(
+          maxSftpFiles > 1 && maxSftpFiles <= 16,
+          `小文件 SFTP 上传并发应在 2 到 16 之间，实际 ${maxSftpFiles}`,
+        );
+        for (const [name, data] of payloads)
+          assert.deepEqual(
+            fs.readFileSync(path.join(remote, "并发/sftp-concurrent", name)),
+            data,
+          );
+        const uploadDone = transferEvents().find(
+          (event) => event.state === "done",
+        );
+        assert.equal(uploadDone.files.completed, payloads.size);
+        assert.equal(uploadDone.bytes.transferred, 6 * 256 * 1024);
+
+        const local = fs.mkdtempSync(path.join(root, "sftp-parallel-"));
+        chooseFiles = [local];
+        resetSftpStats();
+        events.length = 0;
+        assert.equal(await invoke("sftp:download", "session", "/并发"), true);
+        assert.ok(
+          maxSftpFiles > 1 && maxSftpFiles <= 16,
+          `小文件 SFTP 下载并发应在 2 到 16 之间，实际 ${maxSftpFiles}`,
+        );
+        for (const [name, data] of payloads)
+          assert.deepEqual(
+            fs.readFileSync(path.join(local, "并发/sftp-concurrent", name)),
+            data,
+          );
+        ioDelay = 0;
+      },
+    );
+    await t.test(
+      "SFTP parallel pauses resume from each offset and stop cleans unfinished files",
+      async () => {
+        const source = path.join(root, "sftp-parallel-pause");
+        fs.mkdirSync(source);
+        const data = Buffer.alloc(512 * 1024, 0x51);
+        const names = ["a.bin", "b.bin", "c.bin"];
+        for (const name of names)
+          fs.writeFileSync(path.join(source, name), data);
+        await invoke("sftp:mkdir", "session", "/", "并行暂停");
+        ioDelay = 4;
+        events.length = 0;
+        const pending = invoke("sftp:upload-paths", "session", "/并行暂停", [
+          source,
+        ]);
+        await waitFor(() =>
+          transferEvents().some(
+            (event) => event.state === "running" && (event.active ?? 0) > 1,
+          ),
+        );
+        assert.equal(await invoke("transfer:pause", "session"), true);
+        await waitFor(() =>
+          transferEvents().some((event) => event.state === "paused"),
+        );
+        const paused = transferEvents()
+          .filter((event) => event.state === "paused")
+          .at(-1);
+        assert.ok((paused.active ?? 0) > 1);
+        assert.equal(paused.speed, 0);
+        const target = (name) =>
+          path.join(remote, "并行暂停/sftp-parallel-pause", name);
+        for (const name of names) {
+          if (!fs.existsSync(target(name))) continue;
+          const size = await stableSize(target(name));
+          assert.ok(size <= data.length);
+        }
+        assert.ok(paused.bytes.transferred < paused.bytes.total);
+        assert.equal(await invoke("transfer:resume", "session"), true);
+        assert.equal((await pending).length, names.length);
+        for (const name of names)
+          assert.deepEqual(fs.readFileSync(target(name)), data);
+        const done = transferEvents().find((event) => event.state === "done");
+        assert.equal(done.files.completed, names.length);
+        assert.equal(done.bytes.transferred, names.length * data.length);
+
+        // 并行停止：未完成文件被清理，已完成文件保留
+        const cancelledSource = path.join(root, "sftp-parallel-stop");
+        fs.mkdirSync(cancelledSource);
+        for (const name of names)
+          fs.writeFileSync(path.join(cancelledSource, name), data);
+        await invoke("sftp:mkdir", "session", "/", "并行停止");
+        events.length = 0;
+        const cancelledRun = invoke(
+          "sftp:upload-paths",
+          "session",
+          "/并行停止",
+          [cancelledSource],
+        );
+        await waitFor(() =>
+          transferEvents().some(
+            (event) => event.state === "running" && (event.active ?? 0) > 1,
+          ),
+        );
+        assert.equal(await invoke("transfer:cancel", "session"), true);
+        const finished = await cancelledRun;
+        for (const name of names) {
+          const file = path.join(remote, "并行停止/sftp-parallel-stop", name);
+          if (finished.includes(`sftp-parallel-stop/${name}`)) {
+            assert.deepEqual(fs.readFileSync(file), data);
+          } else {
+            assert.equal(fs.existsSync(file), false, `${name} 应被清理`);
+          }
+        }
+        assert.ok(
+          transferEvents().some((event) => event.state === "cancelled"),
+        );
+        ioDelay = 0;
+      },
+    );
+    await t.test(
+      "concurrent conflicts share one prompt and batch failures stop the transfer",
+      async () => {
+        await invoke("sftp:mkdir", "session", "/", "冲突并发");
+        const conflictTarget = path.join(remote, "冲突并发/conflict-source");
+        fs.mkdirSync(conflictTarget, { recursive: true });
+        fs.writeFileSync(path.join(conflictTarget, "a.txt"), "old-a");
+        fs.writeFileSync(path.join(conflictTarget, "b.txt"), "old-b");
+        const conflictSource = path.join(root, "conflict-source");
+        fs.mkdirSync(conflictSource);
+        fs.writeFileSync(path.join(conflictSource, "a.txt"), "new-a");
+        fs.writeFileSync(path.join(conflictSource, "b.txt"), "new-b");
+        hostResponse = 0;
+        events.length = 0;
+        const promptsBefore = hostPrompts;
+        assert.deepEqual(
+          await invoke("sftp:upload-paths", "session", "/冲突并发", [
+            conflictSource,
+          ]),
+          [],
+        );
+        assert.equal(hostPrompts - promptsBefore, 1);
+        const skipped = transferEvents().find(
+          (event) => event.state === "done",
+        );
+        assert.equal(skipped.files.skipped, 2);
+        assert.equal(skipped.files.completed, 0);
+        assert.equal(
+          fs.readFileSync(path.join(conflictTarget, "a.txt"), "utf8"),
+          "old-a",
+        );
+        hostResponse = 1;
+
+        // 目标目录只读：文件写入失败后整批终止，只记录一个失败
+        const failSource = path.join(root, "sftp-fail");
+        fs.mkdirSync(failSource);
+        for (const name of ["a", "b", "c", "d"])
+          fs.writeFileSync(path.join(failSource, `${name}.txt`), "data");
+        await invoke("sftp:mkdir", "session", "/", "失败并发");
+        const failTarget = path.join(remote, "失败并发/sftp-fail");
+        fs.mkdirSync(failTarget);
+        fs.chmodSync(failTarget, 0o500);
+        events.length = 0;
+        try {
+          await assert.rejects(
+            invoke("sftp:upload-paths", "session", "/失败并发", [failSource]),
+            /上传失败/,
+          );
+        } finally {
+          fs.chmodSync(failTarget, 0o700);
+        }
+        const failed = transferEvents().at(-1);
+        assert.equal(failed.state, "error");
+        assert.equal(failed.files.failed, 1);
+        assert.equal(failed.files.completed, 0);
+        assert.equal(fs.readdirSync(failTarget).length, 0);
       },
     );
     await t.test(
@@ -1083,6 +1343,10 @@ test(
           () =>
             fs.existsSync(cancelTarget) && fs.statSync(cancelTarget).size > 0,
         );
+        // 并发下等小文件真正完成，验证停止后已完成文件保留
+        await waitFor(() =>
+          transferEvents().some((event) => event.files.completed >= 1),
+        );
         assert.equal(await invoke("transfer:cancel", "ftp"), true);
         assert.deepEqual(await ftpCancelled, ["ftp-cancel/a-small.txt"]);
         assert.equal(
@@ -1100,6 +1364,161 @@ test(
         assert.ok(
           transferEvents().some((event) => event.state === "cancelled"),
         );
+
+        // FTP 批量并发：额外控制连接池，主连接不参与传输
+        const parallelFolder = path.join(root, "ftp-concurrent");
+        fs.mkdirSync(parallelFolder);
+        const parallelPayloads = new Map();
+        for (let index = 0; index < 6; index += 1) {
+          const name = `f${index}.bin`;
+          const bytes = Buffer.alloc(256 * 1024, 0x30 + index);
+          fs.writeFileSync(path.join(parallelFolder, name), bytes);
+          parallelPayloads.set(name, bytes);
+        }
+        await invoke("sftp:mkdir", "ftp", "/", "并发");
+        ftpServer.setIoDelay(2);
+        ftpServer.resetStats();
+        events.length = 0;
+        const ftpUploaded = await invoke("sftp:upload-paths", "ftp", "/并发", [
+          parallelFolder,
+        ]);
+        assert.equal(ftpUploaded.length, parallelPayloads.size);
+        const uploadStats = ftpServer.stats();
+        assert.ok(
+          uploadStats.maxTransfers > 1 && uploadStats.maxTransfers <= 3,
+          `FTP 上传并发应在 2 到 3 之间，实际 ${uploadStats.maxTransfers}`,
+        );
+        assert.ok(
+          uploadStats.maxConnections > 1 && uploadStats.maxConnections <= 4,
+          `FTP 控制连接应为 2 到 4 条，实际 ${uploadStats.maxConnections}`,
+        );
+        await waitFor(() => ftpServer.stats().connections === 1);
+        for (const [name, bytes] of parallelPayloads)
+          assert.deepEqual(
+            fs.readFileSync(path.join(ftpRoot, "并发/ftp-concurrent", name)),
+            bytes,
+          );
+        const ftpParallelDownload = fs.mkdtempSync(
+          path.join(root, "ftp-parallel-"),
+        );
+        chooseFiles = [ftpParallelDownload];
+        ftpServer.resetStats();
+        events.length = 0;
+        assert.equal(await invoke("sftp:download", "ftp", "/并发"), true);
+        const downloadStats = ftpServer.stats();
+        assert.ok(downloadStats.maxTransfers <= 3);
+        await waitFor(() => ftpServer.stats().connections === 1);
+        for (const [name, bytes] of parallelPayloads)
+          assert.deepEqual(
+            fs.readFileSync(
+              path.join(ftpParallelDownload, "并发/ftp-concurrent", name),
+            ),
+            bytes,
+          );
+
+        // 服务器拒绝额外连接时降级为主连接串行，传输仍全部完成
+        const limitedFolder = path.join(root, "ftp-limited");
+        fs.mkdirSync(limitedFolder);
+        for (let index = 0; index < 3; index += 1)
+          fs.writeFileSync(
+            path.join(limitedFolder, `l${index}.txt`),
+            `limited-${index}`,
+          );
+        await invoke("sftp:mkdir", "ftp", "/", "受限");
+        ftpServer.setRejectExtraConnections(true);
+        ftpServer.resetStats();
+        events.length = 0;
+        const limited = await invoke("sftp:upload-paths", "ftp", "/受限", [
+          limitedFolder,
+        ]);
+        assert.equal(limited.length, 3);
+        const limitedStats = ftpServer.stats();
+        assert.equal(limitedStats.maxTransfers, 1);
+        assert.equal(limitedStats.maxConnections, 1);
+        assert.equal(
+          fs.readFileSync(
+            path.join(ftpRoot, "受限/ftp-limited/l1.txt"),
+            "utf8",
+          ),
+          "limited-1",
+        );
+        ftpServer.setRejectExtraConnections(false);
+
+        // FTP 并行暂停/继续与停止
+        const parallelPause = path.join(root, "ftp-parallel-pause");
+        fs.mkdirSync(parallelPause);
+        const pauseData = Buffer.alloc(768 * 1024, 0x66);
+        const pauseNames = ["p1.bin", "p2.bin"];
+        for (const name of pauseNames)
+          fs.writeFileSync(path.join(parallelPause, name), pauseData);
+        await invoke("sftp:mkdir", "ftp", "/", "并发暂停");
+        ftpServer.setIoDelay(4);
+        events.length = 0;
+        const ftpParallelPending = invoke(
+          "sftp:upload-paths",
+          "ftp",
+          "/并发暂停",
+          [parallelPause],
+        );
+        await waitFor(() =>
+          transferEvents().some(
+            (event) => event.state === "running" && (event.active ?? 0) > 1,
+          ),
+        );
+        assert.equal(await invoke("transfer:pause", "ftp"), true);
+        await waitFor(() =>
+          transferEvents().some((event) => event.state === "paused"),
+        );
+        const ftpParallelPaused = transferEvents()
+          .filter((event) => event.state === "paused")
+          .at(-1);
+        assert.ok((ftpParallelPaused.active ?? 0) > 1);
+        assert.equal(ftpParallelPaused.speed, 0);
+        for (const name of pauseNames) {
+          const file = path.join(ftpRoot, "并发暂停/ftp-parallel-pause", name);
+          if (fs.existsSync(file)) await stableSize(file);
+        }
+        assert.equal(await invoke("transfer:resume", "ftp"), true);
+        assert.equal((await ftpParallelPending).length, pauseNames.length);
+        for (const name of pauseNames)
+          assert.deepEqual(
+            fs.readFileSync(
+              path.join(ftpRoot, "并发暂停/ftp-parallel-pause", name),
+            ),
+            pauseData,
+          );
+
+        const parallelStop = path.join(root, "ftp-parallel-stop");
+        fs.mkdirSync(parallelStop);
+        for (const name of pauseNames)
+          fs.writeFileSync(path.join(parallelStop, name), pauseData);
+        await invoke("sftp:mkdir", "ftp", "/", "并发停止");
+        events.length = 0;
+        const ftpParallelCancelled = invoke(
+          "sftp:upload-paths",
+          "ftp",
+          "/并发停止",
+          [parallelStop],
+        );
+        await waitFor(() =>
+          transferEvents().some(
+            (event) => event.state === "running" && (event.active ?? 0) > 1,
+          ),
+        );
+        assert.equal(await invoke("transfer:cancel", "ftp"), true);
+        const ftpFinished = await ftpParallelCancelled;
+        for (const name of pauseNames) {
+          const file = path.join(ftpRoot, "并发停止/ftp-parallel-stop", name);
+          if (ftpFinished.includes(`ftp-parallel-stop/${name}`)) {
+            assert.deepEqual(fs.readFileSync(file), pauseData);
+          } else {
+            assert.equal(fs.existsSync(file), false, `${name} 应被清理`);
+          }
+        }
+        assert.ok(
+          transferEvents().some((event) => event.state === "cancelled"),
+        );
+
         ftpServer.setIoDelay(0);
         assert.equal(await invoke("transfer:pause", "ftp"), false);
 
