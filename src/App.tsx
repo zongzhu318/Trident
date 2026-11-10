@@ -252,8 +252,10 @@ export default function App() {
     )
       return;
     await api.disconnect(id);
+    const index = sessions.findIndex((s) => s.id === id);
+    const leftId = index > 0 ? sessions[index - 1].id : "home";
     setSessions((items) => items.filter((s) => s.id !== id));
-    if (active === id) setActive("home");
+    if (active === id) setActive(leftId);
   }
   function duplicateSession(session: Session) {
     const saved = profiles.find((p) => p.id === session.profile.id);
