@@ -151,28 +151,30 @@ function sftpFiles(sftp) {
               mode: 0o600,
             })
           : sftp.createWriteStream(remote, { flags: "wx", mode: 0o600 });
-      let opened = false;
+      // 先等 OPEN 结果再开始传输：若在 OPEN 往返中因停止销毁流，服务端可能已创建
+      // 远程文件，但客户端收不到 open 回调，清理阶段就无法删除残留空文件
       let openError = null;
-      destination.once("open", () => {
-        opened = true;
-        onOpen?.();
+      await new Promise((resolve) => {
+        destination.once("open", () => {
+          onOpen?.();
+          resolve();
+        });
+        destination.once("error", (error) => {
+          openError = error;
+          resolve();
+        });
       });
-      destination.once("error", (error) => {
-        if (!opened) openError = error;
-      });
-      try {
-        await pipeline(
-          createReadStream(local, start > 0 ? { start } : undefined),
-          meter(report, start, size),
-          destination,
-          { signal },
-        );
-      } catch (error) {
+      if (openError) {
         // 独占创建在打开阶段失败且尚未写入：可能只是同名冲突，交给上层确认
-        if (start === 0 && openError && !signal?.aborted)
-          error.sftpOpenFailed = true;
-        throw error;
+        if (start === 0 && !signal?.aborted) openError.sftpOpenFailed = true;
+        throw openError;
       }
+      await pipeline(
+        createReadStream(local, start > 0 ? { start } : undefined),
+        meter(report, start, size),
+        destination,
+        { signal },
+      );
     },
     async download(remote, local, report, { signal, start = 0 } = {}) {
       const { size } = await call(sftp, "lstat", remote);
