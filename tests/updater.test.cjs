@@ -136,7 +136,6 @@ test("development builds expose an explanation without loading native updates", 
       isBusy: () => false,
       load: assert.fail,
     });
-    updater.assertCanConnect();
     updater.menu()[0].click();
     assert.match(errors[0], /未配置/);
     assert.equal(updater.menu()[1].enabled, false);
@@ -157,7 +156,6 @@ test("Windows development builds explain packaging requirement without network a
       isBusy: () => false,
       load: assert.fail,
     });
-    updater.assertCanConnect();
     assert.equal(updater.menu()[0].label, "检查更新…");
     updater.menu()[0].click();
     assert.match(errors[0], /打包版/);
@@ -272,10 +270,7 @@ test("Windows release notes in HTML are converted to plain text for the prompt",
     });
     await flush();
     assert.equal(dialogs.length, 1);
-    assert.equal(
-      dialogs[0].detail,
-      "优化\n\n• 例行发布，无用户可感知的变更。",
-    );
+    assert.equal(dialogs[0].detail, "优化\n\n• 例行发布，无用户可感知的变更。");
     assert.equal(fake.calls.installs.length, 0);
   } finally {
     Object.defineProperty(process, "platform", { value: original });
@@ -341,10 +336,7 @@ test("Windows install confirmation saves state via prepareQuit before quitting",
     };
     fake.emit("update-downloaded", { version: "1.2.4", releaseNotes: "" });
     await flush();
-    assert.deepEqual(order, [
-      "prepare",
-      ["install", true, true],
-    ]);
+    assert.deepEqual(order, ["prepare", ["install", true, true]]);
   } finally {
     Object.defineProperty(process, "platform", { value: original });
   }
@@ -502,5 +494,83 @@ test("resume that fails to terminate the app restores availability", async () =>
   } finally {
     Object.defineProperty(process, "platform", { value: originalPlatform });
     process.resourcesPath = originalResourcesPath;
+  }
+});
+
+test("update checks or downloads never gate new connections", () => {
+  const bridge = {
+    start() {},
+    state: () => ({
+      canCheck: false,
+      checking: true,
+      installing: false,
+      automatic: true,
+      pendingInstall: false,
+    }),
+    setBusy() {},
+    setAutomatic() {},
+  };
+  const originalPlatform = process.platform;
+  const originalResourcesPath = process.resourcesPath;
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  process.resourcesPath = "/tmp/trident-test-resources";
+  try {
+    const updater = createUpdater({
+      app: { isPackaged: true },
+      dialog: { showErrorBox: assert.fail },
+      prepareQuit: assert.fail,
+      isBusy: () => false,
+      load: (p) => (p.endsWith("config.json") ? { enabled: true } : bridge),
+    });
+    // 连接闸门只由退出协调器承担，更新器不再提供任何拒绝连接的入口
+    assert.equal("assertCanConnect" in updater, false);
+    assert.doesNotThrow(() => updater.refreshBusy());
+    assert.doesNotThrow(() => updater.menu());
+  } finally {
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+    process.resourcesPath = originalResourcesPath;
+  }
+});
+
+test("cancelled install confirmation ends the pending Sparkle session", async () => {
+  for (const failure of ["cancel", "throw"]) {
+    const errors = [];
+    const calls = { resumes: 0, cancellations: 0, cancelled: 0 };
+    let onEvent;
+    const bridge = {
+      start(callback) {
+        onEvent = callback;
+      },
+      state: () => ({ pendingInstall: true }),
+      setBusy() {},
+      resume: () => calls.resumes++,
+      cancelInstall: () => calls.cancellations++,
+    };
+    const originalPlatform = process.platform;
+    const originalResourcesPath = process.resourcesPath;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    process.resourcesPath = "/tmp/trident-test-resources";
+    try {
+      createUpdater({
+        app: { isPackaged: true },
+        dialog: { showErrorBox: (_, e) => errors.push(e) },
+        prepareQuit: async () => {
+          if (failure === "throw") throw new Error("配置尚未保存");
+          return false;
+        },
+        cancelQuit: () => calls.cancelled++,
+        isBusy: () => false,
+        load: (p) => (p.endsWith("config.json") ? { enabled: true } : bridge),
+      });
+      onEvent("prepare-install");
+      await flush();
+      assert.equal(calls.cancellations, 1);
+      assert.equal(calls.resumes, 0);
+      assert.equal(calls.cancelled, failure === "throw" ? 1 : 0);
+      assert.equal(errors.length, failure === "throw" ? 1 : 0);
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform });
+      process.resourcesPath = originalResourcesPath;
+    }
   }
 });

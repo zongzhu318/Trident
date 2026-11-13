@@ -168,7 +168,6 @@ function handle(channel, fn, { allowWhileClosing = false } = {}) {
 }
 
 async function connect(id, raw, credentials = {}) {
-  updater?.assertCanConnect();
   if (typeof id !== "string" || id.length > 128 || sessions.has(id))
     throw new Error("会话 ID 无效或重复");
   const profile = validate.profile(raw);

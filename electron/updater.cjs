@@ -70,23 +70,31 @@ function createUpdater({
     }
   }
   async function resume() {
+    if (!bridge?.state().pendingInstall) return;
+    let prepared;
     try {
-      if (bridge?.state().pendingInstall && (await prepareQuit())) {
-        bridge.setBusy(false);
-        bridge.resume();
-        // Sparkle 恢复安装的重启若未真正终止进程，不会回调 cancel-install，
-        // 此处兜底恢复 IPC，避免应用留在永久拒绝请求的状态。
-        setTimeout(() => {
-          cancelQuit?.();
-          showError(
-            new Error("更新重启未能完成，已恢复应用；请手动重启以完成更新。"),
-          );
-        }, resumeGraceMs).unref();
-      }
+      prepared = await prepareQuit();
     } catch (error) {
       cancelQuit?.();
+      bridge.cancelInstall();
       showError(error);
+      return;
     }
+    if (!prepared) {
+      // 用户取消安装：以 SKIP 回复正等待确认的 Sparkle 会话，恢复连接与再次检查
+      bridge.cancelInstall();
+      return;
+    }
+    bridge.setBusy(false);
+    bridge.resume();
+    // Sparkle 恢复安装的重启若未真正终止进程，不会回调 cancel-install，
+    // 此处兜底恢复 IPC，避免应用留在永久拒绝请求的状态。
+    setTimeout(() => {
+      cancelQuit?.();
+      showError(
+        new Error("更新重启未能完成，已恢复应用；请手动重启以完成更新。"),
+      );
+    }, resumeGraceMs).unref();
   }
   if (process.platform === "darwin" && app.isPackaged) {
     try {
@@ -133,10 +141,6 @@ function createUpdater({
     }
   }
   return {
-    assertCanConnect() {
-      if (bridge?.state().inProgress)
-        throw new Error("正在检查或安装更新，请完成或关闭更新窗口后再连接。");
-    },
     refreshBusy() {
       bridge?.setBusy(isBusy());
       if (win?.downloaded) void promptInstall();
