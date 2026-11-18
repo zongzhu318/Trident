@@ -1,7 +1,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter, once } = require("node:events");
-const { generateKeyPairSync } = require("node:crypto");
+const { generateKeyPairSync, createHash, randomBytes } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -46,10 +46,33 @@ test(
     let malicious = null;
     // 注入一次性 READ 失败：验证客户端退避后按已写入偏移重试
     let failReadOnce = null;
+    // 注入持续 READ 失败：验证重试耗尽后任务失败并清理
+    let failReadAlways = null;
     // 注入一次性 OPENDIR 失败：验证目录扫描也会退避重试
     let failListOnce = null;
     // 注入指定前缀的 OPEN 失败：跨平台模拟远程写入失败
     let failOpenPrefix = null;
+    // 注入一次性 CLOSE 失败：验证关闭句柄失败不得报告下载成功
+    let failCloseOnce = null;
+    // 下载读取观测：在途 READ、每文件在途数、请求长度与乱序/短读/提前 EOF 注入
+    let readRequests = 0;
+    let readsInFlight = 0;
+    let maxReadsInFlight = 0;
+    const readsInFlightByPath = new Map();
+    const maxReadsInFlightByPath = new Map();
+    let readLengths = [];
+    let readOrder = null;
+    let shortReadPath = null;
+    let emptyReadPath = null;
+    const sizeOverrides = new Map();
+    const resetReadStats = () => {
+      readRequests = 0;
+      readsInFlight = 0;
+      maxReadsInFlight = 0;
+      readsInFlightByPath.clear();
+      maxReadsInFlightByPath.clear();
+      readLengths = [];
+    };
     // SFTP 并发代理：同时打开的文件句柄数
     let openSftpFiles = 0;
     let maxSftpFiles = 0;
@@ -179,9 +202,32 @@ test(
               }),
             );
             sftp.on("READ", (id, h, offset, length) => {
+              const opened = handles.get(h.readUInt32BE());
+              const target = opened?.path;
+              readRequests += 1;
+              readLengths.push(length);
+              readsInFlight += 1;
+              maxReadsInFlight = Math.max(maxReadsInFlight, readsInFlight);
+              if (target) {
+                const current = (readsInFlightByPath.get(target) ?? 0) + 1;
+                readsInFlightByPath.set(target, current);
+                maxReadsInFlightByPath.set(
+                  target,
+                  Math.max(maxReadsInFlightByPath.get(target) ?? 0, current),
+                );
+              }
               const respond = () => {
+                readsInFlight -= 1;
+                if (target) {
+                  const current = (readsInFlightByPath.get(target) ?? 1) - 1;
+                  readsInFlightByPath.set(target, current);
+                }
                 try {
                   const value = handles.get(h.readUInt32BE());
+                  if (!value) {
+                    sftp.status(id, 4);
+                    return;
+                  }
                   if (
                     failReadOnce &&
                     value.path === failReadOnce &&
@@ -191,15 +237,37 @@ test(
                     sftp.status(id, 4);
                     return;
                   }
-                  const buffer = Buffer.alloc(length);
-                  const read = fs.readSync(value.fd, buffer, 0, length, offset);
+                  if (failReadAlways && value.path === failReadAlways) {
+                    sftp.status(id, 4);
+                    return;
+                  }
+                  const limit = sizeOverrides.get(value.path);
+                  if (limit !== undefined && offset >= limit) {
+                    sftp.status(id, 1);
+                    return;
+                  }
+                  if (emptyReadPath && value.path === emptyReadPath) {
+                    emptyReadPath = null;
+                    sftp.data(id, Buffer.alloc(0));
+                    return;
+                  }
+                  let wanted = limit === undefined ? length : limit - offset;
+                  wanted = Math.min(length, wanted);
+                  if (shortReadPath && value.path === shortReadPath)
+                    wanted = Math.max(1, Math.floor(wanted / 2));
+                  const buffer = Buffer.alloc(wanted);
+                  const read = fs.readSync(value.fd, buffer, 0, wanted, offset);
                   if (read) sftp.data(id, buffer.subarray(0, read));
                   else sftp.status(id, 1);
                 } catch {
                   sftp.status(id, 4);
                 }
               };
-              if (ioDelay) setTimeout(respond, ioDelay);
+              let wait = ioDelay;
+              // 首块延迟、后续较快，制造响应乱序
+              if (readOrder && target === readOrder)
+                wait = Math.max(wait, offset === 0 ? 80 : 4);
+              if (wait) setTimeout(respond, wait);
               else respond();
             });
             sftp.on("WRITE", (id, h, offset, data) => {
@@ -227,7 +295,11 @@ test(
               safe(id, () => sftp.attrs(id, attrs(fs.statSync(localPath(p))))),
             );
             sftp.on("LSTAT", (id, p) =>
-              safe(id, () => sftp.attrs(id, attrs(fs.lstatSync(localPath(p))))),
+              safe(id, () => {
+                const value = attrs(fs.lstatSync(localPath(p)));
+                if (sizeOverrides.has(p)) value.size = sizeOverrides.get(p);
+                sftp.attrs(id, value);
+              }),
             );
             sftp.on("RENAME", (id, from, to) =>
               safe(id, () => {
@@ -256,11 +328,16 @@ test(
             sftp.on("CLOSE", (id, h) =>
               safe(id, () => {
                 const value = handles.get(h.readUInt32BE());
-                if (value.fd !== undefined) {
+                if (value?.fd !== undefined) {
                   fs.closeSync(value.fd);
                   openSftpFiles -= 1;
                 }
                 handles.delete(h.readUInt32BE());
+                if (failCloseOnce && value?.path === failCloseOnce) {
+                  failCloseOnce = null;
+                  sftp.status(id, 4);
+                  return;
+                }
                 sftp.status(id, 0);
               }),
             );
@@ -936,13 +1013,19 @@ test(
         hostResponse = 1;
         events.length = 0;
         fs.rmSync(path.join(target, "b.txt"));
-        assert.equal(
-          await invoke("sftp:download-paths", "session", [
-            "/批量冲突/a.txt",
-            "/批量冲突/b.txt",
-          ]),
-          false,
-        );
+        // 延迟读取确保另一个并发文件在停止生效前不会完成
+        ioDelay = 20;
+        try {
+          assert.equal(
+            await invoke("sftp:download-paths", "session", [
+              "/批量冲突/a.txt",
+              "/批量冲突/b.txt",
+            ]),
+            false,
+          );
+        } finally {
+          ioDelay = 0;
+        }
         assert.ok(
           transferEvents().some((event) => event.state === "cancelled"),
         );
@@ -1003,7 +1086,8 @@ test(
         const target = fs.mkdtempSync(path.join(root, "batch-control-"));
         chooseFiles = [target];
         events.length = 0;
-        ioDelay = 3;
+        // 预读会显著缩短大文件下载时间，使用更高读取延迟保证暂停调用仍在进行中
+        ioDelay = 20;
         try {
           const batch = invoke("sftp:download-paths", "session", [
             "/批量控制/batch-a.bin",
@@ -1417,6 +1501,315 @@ test(
         assert.equal(failReadOnce, null, "fault should have been triggered");
         assert.deepEqual(fs.readFileSync(destination), content);
         assert.equal(lastTransfer().state, "done");
+      },
+    );
+    await t.test(
+      "single SFTP download keeps multiple reads in flight within the file window",
+      async () => {
+        const dir = path.join(remote, "预读");
+        fs.mkdirSync(dir);
+        const content = randomBytes(2 * 1024 * 1024);
+        fs.writeFileSync(path.join(dir, "big.bin"), content);
+        destination = path.join(root, "prefetch-big.bin");
+        resetReadStats();
+        ioDelay = 15;
+        try {
+          assert.equal(
+            await invoke("sftp:download", "session", "/预读/big.bin"),
+            true,
+          );
+        } finally {
+          ioDelay = 0;
+        }
+        assert.ok(
+          maxReadsInFlight > 1,
+          `单文件下载应存在多个在途 READ，实际 ${maxReadsInFlight}`,
+        );
+        assert.ok(
+          maxReadsInFlight <= 8,
+          `单文件在途 READ 不得超过窗口 8，实际 ${maxReadsInFlight}`,
+        );
+        assert.ok(
+          (maxReadsInFlightByPath.get("/预读/big.bin") ?? 0) <= 8,
+          "每文件在途 READ 应受窗口限制",
+        );
+        assert.ok(
+          readLengths.every((length) => length <= 64 * 1024),
+          "单次读取不得超过 64 KiB 块",
+        );
+        assert.deepEqual(fs.readFileSync(destination), content);
+        assert.equal(lastTransfer().state, "done");
+        assert.equal(lastTransfer().bytes.transferred, content.length);
+      },
+    );
+    await t.test(
+      "SFTP download reassembles out-of-order and short reads without gaps",
+      async () => {
+        const dir = path.join(remote, "乱序短读");
+        fs.mkdirSync(dir);
+        const content = randomBytes(1024 * 1024 + 123);
+        fs.writeFileSync(path.join(dir, "mixed.bin"), content);
+        readOrder = "/乱序短读/mixed.bin";
+        shortReadPath = "/乱序短读/mixed.bin";
+        destination = path.join(root, "reordered.bin");
+        resetReadStats();
+        try {
+          assert.equal(
+            await invoke("sftp:download", "session", "/乱序短读/mixed.bin"),
+            true,
+          );
+        } finally {
+          readOrder = null;
+          shortReadPath = null;
+        }
+        const downloaded = fs.readFileSync(destination);
+        assert.deepEqual(downloaded, content);
+        assert.equal(
+          createHash("sha256").update(downloaded).digest("hex"),
+          createHash("sha256").update(content).digest("hex"),
+        );
+        assert.ok(maxReadsInFlight > 1);
+        assert.ok(maxReadsInFlight <= 8);
+        assert.equal(lastTransfer().bytes.transferred, content.length);
+      },
+    );
+    await t.test(
+      "SFTP download handles empty files and rejects truncated sources",
+      async () => {
+        const dir = path.join(remote, "边界");
+        fs.mkdirSync(dir);
+        fs.writeFileSync(path.join(dir, "empty.txt"), "");
+        destination = path.join(root, "edge-empty.txt");
+        resetReadStats();
+        assert.equal(
+          await invoke("sftp:download", "session", "/边界/empty.txt"),
+          true,
+        );
+        assert.equal(fs.readFileSync(destination, "utf8"), "");
+        assert.equal(readRequests, 0, "空文件不应发出内容读取请求");
+
+        // 服务器报告的大小大于实际可读数据：提前 EOF 必须失败并清理
+        fs.writeFileSync(
+          path.join(dir, "short.bin"),
+          Buffer.alloc(128 * 1024, 0x71),
+        );
+        sizeOverrides.set("/边界/short.bin", 256 * 1024);
+        destination = path.join(root, "edge-short.bin");
+        try {
+          await assert.rejects(
+            invoke("sftp:download", "session", "/边界/short.bin"),
+            /截短/,
+          );
+        } finally {
+          sizeOverrides.clear();
+        }
+        assert.equal(lastTransfer().state, "error");
+        assert.equal(fs.existsSync(destination), false);
+        assert.equal(
+          fs.readdirSync(root).some((name) => name.endsWith(".part")),
+          false,
+        );
+
+        // 零字节 DATA 与 EOF 同样视为源文件截短
+        fs.writeFileSync(
+          path.join(dir, "zero.bin"),
+          Buffer.alloc(128 * 1024, 0x72),
+        );
+        emptyReadPath = "/边界/zero.bin";
+        destination = path.join(root, "edge-zero.bin");
+        await assert.rejects(
+          invoke("sftp:download", "session", "/边界/zero.bin"),
+          /截短/,
+        );
+        assert.equal(emptyReadPath, null);
+        assert.equal(fs.existsSync(destination), false);
+        assert.equal(
+          fs.readdirSync(root).some((name) => name.endsWith(".part")),
+          false,
+        );
+      },
+    );
+    await t.test(
+      "concurrent downloads share the session read budget and cancel cleanly",
+      async () => {
+        const dir = path.join(remote, "读取预算");
+        fs.mkdirSync(dir);
+        const payloads = new Map();
+        const sources = [];
+        for (let index = 0; index < 10; index += 1) {
+          const name = `${index}.bin`;
+          const content = randomBytes(512 * 1024);
+          fs.writeFileSync(path.join(dir, name), content);
+          payloads.set(name, content);
+          sources.push(`/读取预算/${name}`);
+        }
+        const target = fs.mkdtempSync(path.join(root, "budget-"));
+        chooseFiles = [target];
+        resetReadStats();
+        ioDelay = 12;
+        try {
+          assert.equal(
+            await invoke("sftp:download-paths", "session", sources),
+            true,
+          );
+        } finally {
+          ioDelay = 0;
+        }
+        assert.ok(maxReadsInFlight > 8, "多任务应产生跨文件的并发读取");
+        assert.ok(
+          maxReadsInFlight <= 32,
+          `会话在途读取不得超过 32，实际 ${maxReadsInFlight}`,
+        );
+        for (const current of maxReadsInFlightByPath.values())
+          assert.ok(current <= 8, "每文件在途读取不得超过窗口 8");
+        for (const [name, content] of payloads)
+          assert.deepEqual(fs.readFileSync(path.join(target, name)), content);
+
+        // 停止等待或运行中的任务：迟到响应不得再写入，后续下载仍可用
+        const cancelTarget = fs.mkdtempSync(path.join(root, "budget-cancel-"));
+        chooseFiles = [cancelTarget];
+        events.length = 0;
+        ioDelay = 12;
+        const running = invoke("sftp:download-paths", "session", sources);
+        try {
+          await waitFor(() =>
+            transferEvents().some(
+              (event) => event.state === "running" && event.transferred > 0,
+            ),
+          );
+          const taskId = transferEvents().find(
+            (event) => event.state === "running",
+          ).taskId;
+          assert.equal(
+            await invoke("transfer:cancel", "session", taskId),
+            true,
+          );
+          assert.equal(await running, false);
+          // 等待延迟响应返回后确认没有迟到写入
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          assert.equal(
+            fs.readdirSync(cancelTarget).some((name) => name.endsWith(".part")),
+            false,
+          );
+        } finally {
+          ioDelay = 0;
+        }
+        destination = path.join(root, "after-budget-cancel.bin");
+        assert.equal(
+          await invoke("sftp:download", "session", "/读取预算/0.bin"),
+          true,
+        );
+        assert.deepEqual(fs.readFileSync(destination), payloads.get("0.bin"));
+      },
+    );
+    await t.test(
+      "prefetch pause keeps a continuous prefix and resumes without duplicates",
+      async () => {
+        const dir = path.join(remote, "预读暂停");
+        fs.mkdirSync(dir);
+        const content = randomBytes(3 * 1024 * 1024);
+        fs.writeFileSync(path.join(dir, "pause.bin"), content);
+        destination = path.join(root, "prefetch-pause.bin");
+        events.length = 0;
+        ioDelay = 10;
+        try {
+          const pending = invoke(
+            "sftp:download",
+            "session",
+            "/预读暂停/pause.bin",
+          );
+          await waitFor(() =>
+            transferEvents().some(
+              (event) =>
+                event.state === "running" &&
+                event.name === "pause.bin" &&
+                event.transferred > 0,
+            ),
+          );
+          assert.equal(await invoke("transfer:pause", "session"), true);
+          await waitFor(() =>
+            transferEvents().some((event) => event.state === "paused"),
+          );
+          const part = fs
+            .readdirSync(root)
+            .find(
+              (name) =>
+                name.startsWith("prefetch-pause.bin.") &&
+                name.endsWith(".part"),
+            );
+          assert.ok(part, "暂停时应保留临时文件");
+          const size = await stableSize(path.join(root, part));
+          assert.ok(size > 0 && size < content.length);
+          assert.deepEqual(
+            fs.readFileSync(path.join(root, part)),
+            content.subarray(0, size),
+            "临时文件必须是源文件的连续前缀",
+          );
+          // 快速暂停后立即继续
+          assert.equal(await invoke("transfer:resume", "session"), true);
+          assert.equal(await pending, true);
+        } finally {
+          ioDelay = 0;
+        }
+        assert.deepEqual(fs.readFileSync(destination), content);
+        const done = transferEvents().at(-1);
+        assert.equal(done.state, "done");
+        assert.equal(done.bytes.transferred, content.length);
+        assert.equal(
+          fs.readdirSync(root).some((name) => name.endsWith(".part")),
+          false,
+        );
+      },
+    );
+    await t.test(
+      "SFTP download fails after retry exhaustion and on handle close errors",
+      async () => {
+        const dir = path.join(remote, "重试耗尽");
+        fs.mkdirSync(dir);
+        fs.writeFileSync(
+          path.join(dir, "always.bin"),
+          Buffer.alloc(256 * 1024, 0x44),
+        );
+        failReadAlways = "/重试耗尽/always.bin";
+        destination = path.join(root, "retry-exhaust.bin");
+        try {
+          await assert.rejects(
+            invoke("sftp:download", "session", "/重试耗尽/always.bin"),
+            /下载失败/,
+          );
+        } finally {
+          failReadAlways = null;
+        }
+        assert.equal(lastTransfer().state, "error");
+        assert.equal(fs.existsSync(destination), false);
+        assert.equal(
+          fs.readdirSync(root).some((name) => name.endsWith(".part")),
+          false,
+        );
+
+        const closeDir = path.join(remote, "关闭失败");
+        fs.mkdirSync(closeDir);
+        fs.writeFileSync(
+          path.join(closeDir, "close.bin"),
+          Buffer.alloc(128 * 1024, 0x45),
+        );
+        failCloseOnce = "/关闭失败/close.bin";
+        destination = path.join(root, "close-fail.bin");
+        await assert.rejects(
+          invoke("sftp:download", "session", "/关闭失败/close.bin"),
+          /下载失败/,
+        );
+        assert.equal(failCloseOnce, null, "关闭失败注入应被触发");
+        assert.equal(lastTransfer().state, "error");
+        assert.equal(
+          fs.existsSync(destination),
+          false,
+          "句柄关闭失败不得报告下载成功",
+        );
+        assert.equal(
+          fs.readdirSync(root).some((name) => name.endsWith(".part")),
+          false,
+        );
       },
     );
     await t.test(

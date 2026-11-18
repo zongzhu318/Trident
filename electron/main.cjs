@@ -18,7 +18,7 @@ const validate = require("./validation.cjs");
 const { TerminalOutput } = require("./terminal-output.cjs");
 const { createUpdater } = require("./updater.cjs");
 const { createQuitCoordinator } = require("./quit-coordinator.cjs");
-const { sftpFiles, ftpFiles } = require("./files.cjs");
+const { sftpFiles, ftpFiles, createSftpReadBudget } = require("./files.cjs");
 const {
   makeVault,
   relevant,
@@ -142,6 +142,7 @@ function disconnect(id) {
       emitTransfer(controller, true);
     }
     session.transfers.clear();
+    session.readBudget?.close();
     session.output?.dispose();
     session.ready = false;
     sessions.delete(id);
@@ -190,6 +191,7 @@ async function connect(id, raw, credentials = {}) {
     files: null,
     controlFiles: null,
     limiter: null,
+    readBudget: null,
   };
   sessions.set(id, session);
   updater?.refreshBusy();
@@ -283,16 +285,22 @@ async function connect(id, raw, credentials = {}) {
             emit(id, "notice", `SFTP 不可用：${sftpError.message}`);
           else {
             session.sftp = sftp;
-            session.files = sftpFiles(sftp);
+            // 同一会话的全部下载共享读取预算，单文件窗口在适配器内部限制
+            session.readBudget = createSftpReadBudget();
+            session.files = sftpFiles(sftp, {
+              readBudget: session.readBudget,
+            });
             session.controlFiles = session.files;
             // 多任务共享同一条 SFTP 通道，用会话级槽位限制总并发句柄数
             session.limiter = createLimiter(SFTP_SMALL_CONCURRENCY);
             sftp.on("error", (error) => {
+              session.readBudget?.close();
               session.files = null;
               session.controlFiles = null;
               emit(id, "notice", `SFTP 错误：${error.message}`);
             });
             sftp.on("close", () => {
+              session.readBudget?.close();
               session.files = null;
               session.controlFiles = null;
             });
@@ -538,7 +546,12 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function shouldRetrySftp(c, error, attempts) {
-  return !c.session?.ftp && error?.code === 4 && attempts < SFTP_RETRY_LIMIT;
+  return (
+    !c.session?.ftp &&
+    error?.code === 4 &&
+    !error.sftpCloseFailed &&
+    attempts < SFTP_RETRY_LIMIT
+  );
 }
 // 目录扫描与文件读写同样可能遇到瞬时 SSH_FX_FAILURE，按相同策略退避重试
 async function retrySftp(c, operation) {
@@ -1321,6 +1334,7 @@ async function runDownloadFile(c, entry) {
         .then((info) => info.size)
         .catch(() => 0);
       if (size >= entry.size) {
+        checkCancelled(c);
         await fs.rename(entry.temp, entry.local);
         return;
       }
@@ -1342,6 +1356,8 @@ async function runDownloadFile(c, entry) {
           start,
         }),
       );
+      // 停止可能发生在下载完成与改名之间，此时不得再产生目标文件
+      checkCancelled(c);
       await fs.rename(entry.temp, entry.local);
       return;
     } catch (error) {

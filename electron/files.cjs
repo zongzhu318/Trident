@@ -13,6 +13,104 @@ const call = (sftp, method, ...args) =>
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // 中止后等待服务端关闭数据连接的控制响应，避免污染后续命令的应答队列
 const FTP_CONTROL_TIMEOUT = 1000;
+const SFTP_DOWNLOAD_BLOCK = 64 * 1024;
+const SFTP_DOWNLOAD_WINDOW = 8;
+const SFTP_SESSION_READ_LIMIT = 32;
+
+function abortError() {
+  const error = new Error("传输已中止");
+  error.name = "AbortError";
+  return error;
+}
+
+// 会话内全部 SFTP 下载共享的块额度：按申请顺序唤醒，等待者可被取消
+function createSftpReadBudget(limit = SFTP_SESSION_READ_LIMIT) {
+  let active = 0;
+  let closed = false;
+  const waiters = [];
+  const makeRelease = () => {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      active -= 1;
+      wake();
+    };
+  };
+  function wake() {
+    while (!closed && waiters.length && active < limit) {
+      const waiter = waiters.shift();
+      if (waiter.onAbort)
+        waiter.signal.removeEventListener("abort", waiter.onAbort);
+      active += 1;
+      waiter.resolve(makeRelease());
+    }
+  }
+  return {
+    acquire(signal) {
+      return new Promise((resolve, reject) => {
+        if (closed) return reject(new Error("SFTP 连接已关闭"));
+        if (signal?.aborted) return reject(abortError());
+        if (active < limit) {
+          active += 1;
+          resolve(makeRelease());
+          return;
+        }
+        const waiter = { resolve, reject, signal, onAbort: null };
+        if (signal) {
+          waiter.onAbort = () => {
+            const index = waiters.indexOf(waiter);
+            if (index >= 0) waiters.splice(index, 1);
+            reject(abortError());
+          };
+          signal.addEventListener("abort", waiter.onAbort, { once: true });
+        }
+        waiters.push(waiter);
+      });
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      while (waiters.length) {
+        const waiter = waiters.shift();
+        if (waiter.onAbort)
+          waiter.signal.removeEventListener("abort", waiter.onAbort);
+        waiter.reject(new Error("SFTP 连接已关闭"));
+      }
+    },
+  };
+}
+
+// 追加写入流：按顺序写入连续前缀，写入回调成功后才计入进度
+function appendSink(file) {
+  const stream = createWriteStream(file, { flags: "a", mode: 0o600 });
+  let failure = null;
+  const closed = new Promise((resolve) => stream.once("close", resolve));
+  stream.on("error", (error) => {
+    failure ??= error;
+  });
+  return {
+    write(buffer) {
+      return new Promise((resolve, reject) => {
+        if (failure) return reject(failure);
+        stream.write(buffer, (error) => {
+          if (error) return reject(error);
+          if (failure) return reject(failure);
+          resolve();
+        });
+      });
+    },
+    async close() {
+      if (!stream.destroyed) stream.end();
+      await closed;
+      if (failure) throw failure;
+    },
+    async abort() {
+      if (!stream.destroyed) stream.destroy();
+      await closed;
+    },
+  };
+}
 
 function modeToSymbolic(mode) {
   if (!Number.isInteger(mode)) return "";
@@ -52,7 +150,7 @@ function meter(report, start, total) {
   });
 }
 
-function sftpFiles(sftp) {
+function sftpFiles(sftp, { readBudget = createSftpReadBudget() } = {}) {
   return {
     async list(directory) {
       const resolved = await call(
@@ -179,13 +277,169 @@ function sftpFiles(sftp) {
     async download(remote, local, report, { signal, start = 0 } = {}) {
       const { size } = await call(sftp, "lstat", remote);
       report(start, size);
-      await pipeline(
-        sftp.createReadStream(remote, start > 0 ? { start } : undefined),
-        meter(report, start, size),
-        // 临时文件名由本次任务随机生成，追加写入即可从偏移续传
-        createWriteStream(local, { flags: "a", mode: 0o600 }),
-        { signal },
-      );
+      // 以开始时取得的文件大小限定本次传输；服务器提前结束即视为源文件被截短
+      const end = size;
+      const sink = appendSink(local);
+      const inner = new AbortController();
+      let aborted = false;
+      let failure = null;
+      let handle = null;
+      let opened = false;
+      let cursor = start;
+      let writeOffset = start;
+      const chunks = new Map();
+      const waiters = new Set();
+      const wake = () => {
+        const pending = [...waiters];
+        waiters.clear();
+        for (const resolve of pending) resolve();
+      };
+      const stop = (error) => {
+        failure ??= error;
+        inner.abort();
+        wake();
+      };
+      const onAbort = () => {
+        aborted = true;
+        inner.abort();
+        sink.abort().catch(() => {});
+        wake();
+      };
+      const changed = () =>
+        new Promise((resolve) => {
+          waiters.add(resolve);
+        });
+      const truncated = () => new Error("源文件已截短，下载未完成");
+
+      // 一个块可能被服务器拆成多次短读，填满后才允许写入
+      const readChunk = (chunk) => {
+        const position = chunk.offset + chunk.filled;
+        const length = chunk.length - chunk.filled;
+        const settle = (error, bytes) => {
+          if (aborted || failure) return;
+          if (error) {
+            stop(error);
+            return;
+          }
+          if (!bytes) {
+            stop(truncated());
+            return;
+          }
+          chunk.filled += bytes;
+          if (chunk.filled < chunk.length) {
+            readChunk(chunk);
+            return;
+          }
+          chunk.done = true;
+          wake();
+        };
+        try {
+          sftp.read(
+            handle,
+            chunk.buffer,
+            chunk.filled,
+            length,
+            position,
+            settle,
+          );
+        } catch (error) {
+          if (!aborted && !failure) stop(error);
+        }
+      };
+
+      // 读取按偏移连续调度；窗口和会话预算覆盖待写、在途与正在写入的块
+      const schedule = async () => {
+        while (!aborted && !failure && cursor < end) {
+          if (chunks.size >= SFTP_DOWNLOAD_WINDOW) {
+            await changed();
+            continue;
+          }
+          let release;
+          try {
+            release = await readBudget.acquire(inner.signal);
+          } catch (error) {
+            if (!aborted && !failure) failure = error;
+            break;
+          }
+          if (aborted || failure) {
+            release();
+            break;
+          }
+          const offset = cursor;
+          const length = Math.min(SFTP_DOWNLOAD_BLOCK, end - offset);
+          const chunk = {
+            offset,
+            length,
+            buffer: Buffer.allocUnsafe(length),
+            filled: 0,
+            done: false,
+            release,
+          };
+          chunks.set(offset, chunk);
+          cursor = offset + length;
+          readChunk(chunk);
+        }
+      };
+
+      // 只按顺序写入连续前缀；写入成功后才推进进度并释放块额度
+      const writeChunks = async () => {
+        while (!aborted && !failure && writeOffset < end) {
+          const chunk = chunks.get(writeOffset);
+          if (!chunk || !chunk.done) {
+            await changed();
+            continue;
+          }
+          try {
+            await sink.write(chunk.buffer);
+          } catch (error) {
+            chunks.delete(writeOffset);
+            chunk.release();
+            if (!aborted) stop(error);
+            break;
+          }
+          if (aborted || failure) {
+            chunks.delete(writeOffset);
+            chunk.release();
+            break;
+          }
+          chunks.delete(writeOffset);
+          chunk.release();
+          writeOffset += chunk.length;
+          report(writeOffset, end);
+          wake();
+        }
+      };
+
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        if (end > start) {
+          handle = await call(sftp, "open", remote, "r");
+          opened = true;
+        }
+        await Promise.all([schedule(), writeChunks()]);
+        if (aborted) throw abortError();
+        if (failure) throw failure;
+        await sink.close();
+      } catch (error) {
+        failure ??= error;
+        await sink.abort();
+        throw error;
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
+        for (const chunk of chunks.values()) chunk.release();
+        chunks.clear();
+        if (opened) {
+          try {
+            await call(sftp, "close", handle);
+          } catch (error) {
+            // 清理由最初错误主导；正常路径的关闭失败必须上报且不再重试
+            if (!aborted && !failure) {
+              error.sftpCloseFailed = true;
+              throw error;
+            }
+          }
+        }
+      }
     },
   };
 }
@@ -372,6 +626,7 @@ function ftpFiles(client) {
 module.exports = {
   sftpFiles,
   ftpFiles,
+  createSftpReadBudget,
   modeToSymbolic,
   symbolicOrEmpty,
   ftpPermissions,
