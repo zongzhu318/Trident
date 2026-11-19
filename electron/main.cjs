@@ -903,8 +903,9 @@ function reportActive(c, entry, transferred, total) {
 // 远程清理可能遇到服务端句柄未释放或系统瞬时锁定，短暂重试避免留下半截文件
 async function removeIncompleteUpload(session, entry) {
   const files = session?.controlFiles;
-  // 只有本次真正打开/创建过远程文件时才清理，避免误删已存在的同名文件
-  if (!entry.remote || !entry.remoteTouched || !files) return;
+  // 只有本次真正打开/创建过远程文件时才清理，避免误删已存在的同名文件；
+  // 断线后会话失效，此时发请求只会永远等不到应答
+  if (!entry.remote || !entry.remoteTouched || !files || !session.ready) return;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       if (await files.exists(entry.remote)) {

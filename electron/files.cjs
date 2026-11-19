@@ -16,6 +16,8 @@ const FTP_CONTROL_TIMEOUT = 1000;
 const SFTP_DOWNLOAD_BLOCK = 64 * 1024;
 const SFTP_DOWNLOAD_WINDOW = 8;
 const SFTP_SESSION_READ_LIMIT = 32;
+// 停止或断线后通道已关闭，关闭句柄的请求会被丢弃且不再回调
+const SFTP_CLOSE_TIMEOUT = 1000;
 
 function abortError() {
   const error = new Error("传输已中止");
@@ -275,7 +277,11 @@ function sftpFiles(sftp, { readBudget = createSftpReadBudget() } = {}) {
       );
     },
     async download(remote, local, report, { signal, start = 0 } = {}) {
+      if (signal?.aborted) throw abortError();
       const { size } = await call(sftp, "lstat", remote);
+      // 中止监听在 lstat 之后才挂载：期间到达的停止信号必须在这里补检，
+      // 否则继续在已关闭的连接上发请求将永远收不到回调
+      if (signal?.aborted) throw abortError();
       report(start, size);
       // 以开始时取得的文件大小限定本次传输；服务器提前结束即视为源文件被截短
       const end = size;
@@ -429,8 +435,11 @@ function sftpFiles(sftp, { readBudget = createSftpReadBudget() } = {}) {
         for (const chunk of chunks.values()) chunk.release();
         chunks.clear();
         if (opened) {
+          const closing = call(sftp, "close", handle);
           try {
-            await call(sftp, "close", handle);
+            await (aborted || failure
+              ? Promise.race([closing, delay(SFTP_CLOSE_TIMEOUT)])
+              : closing);
           } catch (error) {
             // 清理由最初错误主导；正常路径的关闭失败必须上报且不再重试
             if (!aborted && !failure) {
@@ -551,9 +560,13 @@ function ftpFiles(client) {
     async download(remote, local, report, { signal, start = 0 } = {}) {
       if (signal?.aborted) throw new Error("传输已中止");
       const size = await client.size(remote).catch(() => 0);
+      if (signal?.aborted) throw new Error("传输已中止");
       report(start, size);
       const ftp = client.ftp;
       await client.prepareTransfer(ftp);
+      // 中止监听在数据连接就绪后才挂载：期间到达的停止信号必须在这里补检，
+      // 否则会在已断开的控制连接上等待永远不会到来的应答
+      if (signal?.aborted) throw new Error("传输已中止");
       const socket = ftp.dataSocket;
       if (!socket) throw new Error("无法建立 FTP 数据连接");
       const destination = createWriteStream(local, {
