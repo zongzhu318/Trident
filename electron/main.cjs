@@ -900,11 +900,27 @@ function reportActive(c, entry, transferred, total) {
   syncBytes(c);
   emitTransfer(c);
 }
+// 远程清理可能遇到服务端句柄未释放或系统瞬时锁定，短暂重试避免留下半截文件
+async function removeIncompleteUpload(session, entry) {
+  const files = session?.controlFiles;
+  // 只有本次真正打开/创建过远程文件时才清理，避免误删已存在的同名文件
+  if (!entry.remote || !entry.remoteTouched || !files) return;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      if (await files.exists(entry.remote)) {
+        await files.remove(entry.remote);
+        return;
+      }
+    } catch {
+      // 删除失败同样进入下一轮确认
+    }
+    // 上传连接可能稍后才创建出远程文件，删除也可能瞬时失败：短暂等待后再次确认
+    if (attempt < 2) await delay(100);
+  }
+}
 async function cleanupPartial(session, c, entry) {
   if (c.direction === "upload") {
-    // 只有本次真正打开/创建过远程文件时才清理，避免误删已存在的同名文件
-    if (entry.remote && entry.remoteTouched && session?.controlFiles)
-      await session.controlFiles.remove(entry.remote).catch(() => {});
+    await removeIncompleteUpload(session, entry);
   } else if (entry.temp) {
     await fs.unlink(entry.temp).catch(() => {});
   }
@@ -948,9 +964,7 @@ async function runUploadFile(c, entry) {
     } catch (error) {
       if (c.cancelled || c.stopping) {
         // 停止或同批其它文件失败：仅尽力删除本次真正创建的不完整内容
-        const files = c.session.controlFiles;
-        if (entry.remoteTouched && files)
-          await files.remove(entry.remote).catch(() => {});
+        await removeIncompleteUpload(c.session, entry);
         throw new TransferCancelled();
       }
       if (c.disconnected) throw error;

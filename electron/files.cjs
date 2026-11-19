@@ -519,9 +519,6 @@ function ftpFiles(client) {
     },
     async upload(local, remote, report, { signal, start = 0, onOpen } = {}) {
       if (signal?.aborted) throw new Error("传输已中止");
-      const { size } = await fs.stat(local);
-      report(start, size);
-      onOpen?.();
       const source = createReadStream(local, start > 0 ? { start } : undefined);
       let aborted = false;
       // 主动销毁源流会让 basic-ftp 关闭整条控制连接；改为正常结束数据流
@@ -529,16 +526,25 @@ function ftpFiles(client) {
         aborted = true;
         source.push(null);
       };
+      // 先挂监听再取文件信息：stat 期间停止若不记录，取消会被吞掉并继续整传
       signal?.addEventListener("abort", onAbort, { once: true });
-      client.trackProgress((info) => report(start + info.bytes, size));
       try {
-        // APPE 续写已存在的部分文件；首次上传仍由控制器先做同名检查
-        if (start > 0) await client.appendFrom(source, remote);
-        else await client.uploadFrom(source, remote);
+        const { size } = await fs.stat(local);
+        // 停止发生在 stat 期间时不要发起 STOR，避免远端凭空多出空文件
         if (aborted) throw new Error("传输已中止");
+        report(start, size);
+        onOpen?.();
+        client.trackProgress((info) => report(start + info.bytes, size));
+        try {
+          // APPE 续写已存在的部分文件；首次上传仍由控制器先做同名检查
+          if (start > 0) await client.appendFrom(source, remote);
+          else await client.uploadFrom(source, remote);
+          if (aborted) throw new Error("传输已中止");
+        } finally {
+          client.trackProgress();
+        }
       } finally {
         signal?.removeEventListener("abort", onAbort);
-        client.trackProgress();
         source.destroy();
       }
     },
